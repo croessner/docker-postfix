@@ -1,0 +1,13 @@
+.git
+.DS_Store
+.env
+dist/
+data/
+queue-data/
+examples/certs/
+!examples/certs/
+!examples/certs/.gitkeep
+examples/maps/*.db
+examples/maps/*.db.db
+examples/maps/*.cdb
+examples/maps/*.lmdb

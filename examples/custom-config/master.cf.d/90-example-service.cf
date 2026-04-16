@@ -1,0 +1,6 @@
+# Example snippet for an additional service definition.
+# Keep the built-in postlog/postlogd services when logging to stdout is enabled.
+#
+# 127.0.0.1:10025 inet n  -  n  -  -  smtpd
+#   -o syslog_name=postfix/10025
+#   -o smtpd_authorized_xforward_hosts=127.0.0.0/8

@@ -1,0 +1,135 @@
+name: Publish Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  schedule:
+    - cron: "19 4 * * *"
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: chrroessner/postfix
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract release versions
+        id: versions
+        run: |
+          set -eu
+          postfix_version=$(sed -n 's/^ARG POSTFIX_VERSION=//p' Dockerfile | head -n1)
+          alpine_version=$(sed -n 's/^ARG ALPINE_VERSION=//p' Dockerfile | head -n1)
+          tlsrpt_version=$(sed -n 's/^ARG TLSRPT_VERSION=//p' Dockerfile | head -n1)
+          release_tag=""
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            release_tag="${GITHUB_REF_NAME#v}"
+          fi
+
+          image_version="${release_tag:-$postfix_version}"
+
+          printf 'postfix_version=%s\n' "$postfix_version" >> "$GITHUB_OUTPUT"
+          printf 'alpine_version=%s\n' "$alpine_version" >> "$GITHUB_OUTPUT"
+          printf 'tlsrpt_version=%s\n' "$tlsrpt_version" >> "$GITHUB_OUTPUT"
+          printf 'release_tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
+          printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Docker tags
+        id: docker_tags
+        run: |
+          set -eu
+          {
+            echo 'tags<<EOF'
+            echo "${IMAGE_NAME}:${{ steps.versions.outputs.postfix_version }}"
+            echo "${IMAGE_NAME}:${{ steps.versions.outputs.postfix_version }}-alpine${{ steps.versions.outputs.alpine_version }}"
+            if [ -n "${{ steps.versions.outputs.release_tag }}" ]; then
+              echo "${IMAGE_NAME}:${{ steps.versions.outputs.release_tag }}"
+            fi
+            if [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "master" ] || [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              echo "${IMAGE_NAME}:latest"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          pull: true
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            OCI_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            OCI_URL=https://hub.docker.com/r/chrroessner/postfix
+            OCI_DOCUMENTATION=${{ github.server_url }}/${{ github.repository }}#readme
+            OCI_VERSION=${{ steps.versions.outputs.image_version }}
+            OCI_REVISION=${{ github.sha }}
+          tags: ${{ steps.docker_tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=Postfix Alpine
+            org.opencontainers.image.description=Postfix built from pinned source on Alpine Linux with dynamic maps, env-driven configuration, custom config overlays, and TLSRPT support
+            org.opencontainers.image.licenses=MIT AND IPL-1.0 AND LGPL-3.0-or-later AND BSD-4-Clause-UC
+            org.opencontainers.image.vendor=Rößner-Network-Solutions
+            org.opencontainers.image.authors=Christian Rößner <christian@roessner.email>
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=https://hub.docker.com/r/chrroessner/postfix
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}#readme
+            org.opencontainers.image.version=${{ steps.versions.outputs.image_version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          attests: |
+            type=provenance,mode=max
+            type=sbom
+
+      - name: Export SBOM files
+        run: |
+          set -eu
+          mkdir -p dist/sbom
+          image_ref="${IMAGE_NAME}@${{ steps.build.outputs.digest }}"
+          docker buildx imagetools inspect "$image_ref" \
+            --format '{{ json (index .SBOM "linux/amd64").SPDX }}' \
+            > dist/sbom/postfix-linux-amd64.spdx.json
+          docker buildx imagetools inspect "$image_ref" \
+            --format '{{ json (index .SBOM "linux/arm64").SPDX }}' \
+            > dist/sbom/postfix-linux-arm64.spdx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: postfix-sbom-${{ github.run_id }}
+          path: dist/sbom/*.json
+          if-no-files-found: error
+
+      - name: Sync Docker Hub description
+        if: github.ref == 'refs/heads/main'
+        uses: peter-evans/dockerhub-description@e98e4d1628a5f3be2be7c231e50981aee98723ae # v4.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: chrroessner/postfix
+          short-description: Postfix on Alpine Linux, built from pinned source with dynamic maps, env-driven configuration, custom config overlays, and TLSRPT support.

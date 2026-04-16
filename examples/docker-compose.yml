@@ -1,0 +1,25 @@
+services:
+  postfix:
+    image: ${IMAGE_NAME:-postfix}:${TAG:-latest}
+    build:
+      context: ..
+    container_name: postfix
+    restart: unless-stopped
+    env_file:
+      - ${POSTFIX_ENV_FILE:-../.env}
+    environment:
+      POSTFIX_smtpd_tls_cert_file: /etc/postfix/certs/tls.crt
+      POSTFIX_smtpd_tls_key_file: /etc/postfix/certs/tls.key
+      POSTFIX_smtpd_tls_CAfile: /etc/postfix/certs/ca.crt
+      POSTFIX_transport_maps: lmdb:/etc/postfix/maps/transport
+      POSTFIXMASTER_submission__inet__syslog_name: postfix/submission
+      POSTFIXMASTER_submissions__inet__syslog_name: postfix/submissions
+    ports:
+      - "25:25"
+      - "465:465"
+      - "587:587"
+    volumes:
+      - ./custom-config:/etc/postfix/custom-config:ro
+      - ./maps:/etc/postfix/maps
+      - ./init:/docker-entrypoint-init.d:ro
+      - ./certs:/etc/postfix/certs:ro

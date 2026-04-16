@@ -1,0 +1,37 @@
+# Minimal default main.cf for the container image.
+# The entrypoint renders this file on every start and applies env-driven
+# overrides afterwards so the runtime stays deterministic.
+
+compatibility_level = 3.11
+queue_directory = /var/spool/postfix
+command_directory = /usr/sbin
+daemon_directory = /usr/libexec/postfix
+data_directory = /var/lib/postfix
+meta_directory = /etc/postfix
+shlib_directory = /usr/lib/postfix
+mail_owner = postfix
+setgid_group = postdrop
+
+myhostname = localhost.localdomain
+mydomain = localdomain
+myorigin = $myhostname
+mydestination = localhost
+mynetworks = 127.0.0.0/8 [::1]/128
+
+inet_interfaces = all
+inet_protocols = all
+smtpd_banner = $myhostname ESMTP $mail_name
+
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+html_directory = no
+
+default_database_type = lmdb
+
+smtp_tls_security_level = may
+smtpd_tls_security_level = may
+tls_preempt_cipherlist = yes
+
+smtp_tlsrpt_enable = no
+smtp_tlsrpt_socket_name = run/tlsrpt/tlsrpt.sock

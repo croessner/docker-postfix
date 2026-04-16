@@ -1,0 +1,3 @@
+# Example transport map.
+# Edit the right-hand side to point to your real next hop.
+example.net smtp:[smtp.example.net]:587

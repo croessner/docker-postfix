@@ -1,0 +1,6 @@
+# Example overlay for custom map files.
+transport_maps = lmdb:/etc/postfix/maps/transport
+
+# Example TLS settings.
+smtpd_tls_loglevel = 1
+smtp_tls_loglevel = 1
