@@ -76,7 +76,7 @@ The image is built in two stages:
 
 Current pinned defaults in this repository:
 
-- Postfix `3.11.1`
+- Postfix `3.11.3`
 - `libtlsrpt` `0.5.0`
 - Alpine `3.23`
 
@@ -114,9 +114,9 @@ To pin an explicit upstream release:
 
 ```bash
 docker build \
-  --build-arg POSTFIX_VERSION=3.11.1 \
-  --build-arg POSTFIX_SHA256=659265606ed9b6242964b6d44a2aaf5e607d8fb9ad2541027a4a320ddfb89dc1 \
-  -t postfix:3.11.1 .
+  --build-arg POSTFIX_VERSION=3.11.3 \
+  --build-arg POSTFIX_SHA256=bd11dcc463d7045e40f2c11cc00216489c73b58cc40b3d06c54265b088a173e1 \
+  -t postfix:3.11.3 .
 ```
 
 Multi-arch build with `buildx`:
@@ -124,9 +124,9 @@ Multi-arch build with `buildx`:
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg POSTFIX_VERSION=3.11.1 \
-  --build-arg POSTFIX_SHA256=659265606ed9b6242964b6d44a2aaf5e607d8fb9ad2541027a4a320ddfb89dc1 \
-  -t postfix:3.11.1 \
+  --build-arg POSTFIX_VERSION=3.11.3 \
+  --build-arg POSTFIX_SHA256=bd11dcc463d7045e40f2c11cc00216489c73b58cc40b3d06c54265b088a173e1 \
+  -t postfix:3.11.3 \
   .
 ```
 
@@ -174,7 +174,7 @@ Recommended Docker Hub setup:
 - create a public repository in your own namespace, for example `<your-namespace>/postfix`
 - create a Docker Hub access token dedicated to CI
 - keep `latest` for the default branch
-- publish release tags in the form `v<postfix-version>-r<revision>`, for example `v3.11.1-r1`
+- publish release tags in the form `v<postfix-version>-r<revision>`, for example `v3.11.3-r1`
 
 ## License
 

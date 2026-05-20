@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_index_url="https://ftp.fu-berlin.de/unix/mail/postfix/official/"
+          release_index_url="https://postfix.mirrors.ovh.net/postfix-release/official/"
           current_version="$(sed -n 's/^ARG POSTFIX_VERSION=//p' Dockerfile | head -n1)"
           current_sha256="$(sed -n 's/^ARG POSTFIX_SHA256=//p' Dockerfile | head -n1)"
 
