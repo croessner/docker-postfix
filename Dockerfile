@@ -44,6 +44,7 @@ RUN apk upgrade --no-cache \
         cyrus-sasl-dev \
         db-dev \
         git \
+        icu-dev \
         libmemcached-dev \
         libnsl-dev \
         libpq \
@@ -192,6 +193,7 @@ RUN apk upgrade --no-cache \
         cyrus-sasl \
         cyrus-sasl-login \
         db \
+        icu-libs \
         libmemcached-libs \
         libnsl \
         libpq \
@@ -231,7 +233,8 @@ COPY defaults/master.cf /usr/share/postfix/default-config/container-master.cf
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-healthcheck.sh \
     && chown -R root:root /etc/postfix /usr/share/postfix/default-config \
     && chown -R postfix:postfix /var/lib/postfix \
-    && postfix set-permissions || true
+    && postconf -d smtputf8_enable | grep -q 'yes' \
+    && (postfix set-permissions || true)
 
 EXPOSE 25 465 587
 

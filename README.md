@@ -5,7 +5,7 @@
 [![Last Commit](https://img.shields.io/github/last-commit/croessner/docker-postfix)](https://github.com/croessner/docker-postfix/commits/main)
 [![Stars](https://img.shields.io/github/stars/croessner/docker-postfix?style=social)](https://github.com/croessner/docker-postfix/stargazers)
 
-This project builds a complete Postfix image on **Alpine Linux**, compiles **a pinned Postfix version directly from source**, enables **dynamic lookup tables and optional databases**, and links Postfix against **`libtlsrpt`** so that **TLSRPT** works end-to-end.
+This project builds a complete Postfix image on **Alpine Linux**, compiles **a pinned Postfix version directly from source**, enables **SMTPUTF8/EAI**, enables **dynamic lookup tables and optional databases**, and links Postfix against **`libtlsrpt`** so that **TLSRPT** works end-to-end.
 
 The image uses a clean multi-stage build, pinned upstream sources, predictable runtime defaults, GitHub Actions for publishing, and a runtime model that is **environment-driven first** without blocking **fully custom `main.cf`, `master.cf`, and map files** when you need exact control.
 
@@ -21,6 +21,7 @@ The image uses a clean multi-stage build, pinned upstream sources, predictable r
 - [Important Volumes / Mountpoints](#important-volumes--mountpoints)
 - [Environment Variables](#environment-variables)
 - [Custom Configuration and Maps](#custom-configuration-and-maps)
+- [SMTPUTF8 / EAI](#smtputf8--eai)
 - [TLS and TLSRPT](#tls-and-tlsrpt)
 - [Container Logging](#container-logging)
 - [Health Check](#health-check)
@@ -37,6 +38,7 @@ The image uses a clean multi-stage build, pinned upstream sources, predictable r
 - Support for `_FILE` secret variants for every environment variable
 - Optional full replacement of `main.cf` and `master.cf`
 - Support for custom maps, map compilation hooks, and init scripts
+- SMTPUTF8/EAI support through ICU
 - Clean container logging via `stdout` using `postlogd`
 - GitHub Actions for publishing and upstream checks
 
@@ -91,9 +93,10 @@ The running container exposes the usual built-in Postfix table types plus dynami
 - `nis`
 - `pcre`
 - `pgsql`
-- `sdbm`
 - `sqlite`
 - and the regular built-in lookup types such as `hash`, `btree`, `cidr`, `regexp`, `socketmap`, `tcp`, `texthash`, `unionmap`, `unix`
+
+SDBM is not included on Alpine because the runtime does not provide the `sdbm.h` system interface required by Postfix's optional SDBM plugin.
 
 The default `master.cf` also includes:
 
@@ -101,6 +104,8 @@ The default `master.cf` also includes:
 - `submission`
 - `submissions`
 - `postlog` / `postlogd` for container-friendly logging
+
+The Postfix build also includes SMTPUTF8/EAI support. The runtime default is `smtputf8_enable = yes`.
 
 ## Quick Start
 
@@ -147,7 +152,7 @@ make compose-up
 ```bash
 docker exec postfix postconf -n
 docker exec postfix postconf -m
-docker exec postfix postconf smtp_tlsrpt_enable smtp_tlsrpt_socket_name maillog_file
+docker exec postfix postconf smtputf8_enable smtp_tlsrpt_enable smtp_tlsrpt_socket_name maillog_file
 ```
 
 ## Publishing
@@ -246,6 +251,7 @@ Examples:
 - `POSTFIX_smtpd_tls_cert_file=/etc/postfix/certs/tls.crt`
 - `POSTFIX_smtpd_tls_CAfile=/etc/postfix/certs/ca.crt`
 - `POSTFIX_smtp_tlsrpt_enable=yes`
+- `POSTFIX_smtputf8_enable=yes`
 - `POSTFIX_transport_maps=lmdb:/etc/postfix/maps/transport`
 
 Every variable also supports a `_FILE` variant:
@@ -309,7 +315,7 @@ docker run --rm \
   postfix
 ```
 
-Important for generated map types such as `hash`, `cdb`, `sdbm` or `lmdb`:
+Important for generated map types such as `hash`, `cdb` or `lmdb`:
 
 - `postmap` writes the compiled database next to the source file
 - the mounted map directory must therefore be writable, or you must mount precompiled map files instead
@@ -318,6 +324,22 @@ Important note when replacing `master.cf` completely:
 
 - if `POSTFIX_RUNTIME_LOG_TO_STDOUT=true`, your custom `master.cf` should keep the `postlog` / `postlogd` services
 - if you intentionally remove them, also set `POSTFIX_RUNTIME_LOG_TO_STDOUT=false`
+
+## SMTPUTF8 / EAI
+
+SMTPUTF8 support is compiled in through ICU and defaults to enabled:
+
+- `smtputf8_enable = yes`
+
+You can still disable it for a specific deployment:
+
+```bash
+docker run --rm \
+  -e POSTFIX_smtputf8_enable=no \
+  postfix
+```
+
+SMTPUTF8 also has to be supported by the rest of the mail path, including content filters, LMTP servers, and downstream SMTP servers.
 
 ## TLS and TLSRPT
 
@@ -397,6 +419,7 @@ make sbom-registry IMAGE_NAME=<your-namespace>/postfix TAG=latest
 ## References
 
 - https://www.postfix.org/
+- https://www.postfix.org/SMTPUTF8_README.html
 - https://www.postfix.org/TLSRPT_README.html
 - https://www.postfix.org/MAILLOG_README.html
 - https://github.com/sys4/libtlsrpt

@@ -43,6 +43,12 @@ run:
 
 test-smoke:
 	docker run --rm $(IMAGE_NAME):$(TAG) postfix check
+	docker run --rm $(IMAGE_NAME):$(TAG) sh -eu -c '\
+	  postconf -d smtputf8_enable | grep -q "yes"; \
+	  postconf -m > /tmp/postfix-maps; \
+	  for map in cdb ldap lmdb memcache mongodb mysql nis pcre pgsql sqlite; do \
+	    grep -qx "$$map" /tmp/postfix-maps; \
+	  done'
 
 compose-cert:
 	mkdir -p $(EXAMPLE_CERT_DIR)
