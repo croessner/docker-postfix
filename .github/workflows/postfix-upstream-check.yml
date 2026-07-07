@@ -31,19 +31,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_index_url="https://postfix.mirrors.ovh.net/postfix-release/official/"
+          release_index_url="http://ftp.porcupine.org/mirrors/postfix-release/index.html"
+          release_download_base="http://ftp.porcupine.org/mirrors/postfix-release/official/"
           current_version="$(sed -n 's/^ARG POSTFIX_VERSION=//p' Dockerfile | head -n1)"
           current_sha256="$(sed -n 's/^ARG POSTFIX_SHA256=//p' Dockerfile | head -n1)"
 
           latest_version="$(
             curl -fsSL "$release_index_url" |
-              grep -o 'postfix-[0-9][0-9.]*\.tar\.gz' |
-              sed 's/^postfix-//; s/\.tar\.gz$//' |
+              grep -o 'official/postfix-[0-9][0-9.]*\.tar\.gz' |
+              sed 's|^official/postfix-||; s|\.tar\.gz$||' |
               sort -uV |
               tail -n1
           )"
 
-          tarball_url="${release_index_url}postfix-${latest_version}.tar.gz"
+          tarball_url="${release_download_base}postfix-${latest_version}.tar.gz"
 
           curl -fsSL "$tarball_url" -o /tmp/postfix.tar.gz
           latest_sha256="$(sha256sum /tmp/postfix.tar.gz | awk '{print $1}')"
