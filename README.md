@@ -80,7 +80,7 @@ Current pinned defaults in this repository:
 
 - Postfix `3.11.5`
 - `libtlsrpt` `0.5.0`
-- Alpine `3.23`
+- Alpine `3.24`
 
 The running container exposes the usual built-in Postfix table types plus dynamic lookups such as:
 
