@@ -5,7 +5,7 @@ EXAMPLE_TLS_CERT := $(EXAMPLE_CERT_DIR)/tls.crt
 EXAMPLE_TLS_KEY := $(EXAMPLE_CERT_DIR)/tls.key
 EXAMPLE_TLS_CA := $(EXAMPLE_CERT_DIR)/ca.crt
 
-.PHONY: build push sbom-local sbom-registry run test-smoke compose-up compose-down compose-cert
+.PHONY: build push sbom-local sbom-registry run test-source test-smoke compose-up compose-down compose-cert
 
 build:
 	docker build -t $(IMAGE_NAME):$(TAG) .
@@ -41,9 +41,13 @@ run:
 	  -v $$(pwd)/examples/certs:/etc/postfix/certs:ro \
 	  $(IMAGE_NAME):$(TAG)
 
+test-source:
+	./tests/check-postfix-external-patch.sh
+
 test-smoke:
 	docker run --rm $(IMAGE_NAME):$(TAG) postfix check
 	docker run --rm $(IMAGE_NAME):$(TAG) sh -eu -c '\
+	  postconf -d smtpd_tls_crl_file | grep -q "smtpd_tls_crl_file ="; \
 	  postconf -d smtputf8_enable | grep -q "yes"; \
 	  postconf -m > /tmp/postfix-maps; \
 	  for map in cdb ldap lmdb memcache mongodb mysql nis pcre pgsql sqlite; do \

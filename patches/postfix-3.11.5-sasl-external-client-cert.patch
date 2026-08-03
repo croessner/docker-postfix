@@ -1,0 +1,959 @@
+diff --git a/proto/postconf.proto b/proto/postconf.proto
+index 59c6a14..865d46f 100644
+--- a/proto/postconf.proto
++++ b/proto/postconf.proto
+@@ -10071,6 +10071,15 @@ smtpd_tls_CApath = /etc/postfix/certs
+ 
+ <p> This feature is available in Postfix 2.2 and later.  </p>
+ 
++%PARAM smtpd_tls_crl_file
++
++<p> An optional PEM file with certificate revocation lists for remote SMTP
++client certificates. A non-empty value enables CRL checks for the complete
++client certificate chain. The file must contain all CRLs required for that
++chain. A missing, expired, or invalid CRL makes the affected certificate
++untrusted; a file loading error disables TLS support instead of silently
++skipping revocation checks. </p>
++
+ %PARAM smtpd_tls_loglevel 0
+ 
+ <p> Enable additional Postfix SMTP server logging of TLS activity.
+@@ -16206,6 +16215,11 @@ CA certificates. See smtpd_tls_CApath for further details. </p>
+ 
+ <p> This feature is available in Postfix 2.8 and later. </p>
+ 
++%PARAM tlsproxy_tls_crl_file $smtpd_tls_crl_file
++
++<p> An optional PEM file with certificate revocation lists for remote SMTP
++client certificates. See smtpd_tls_crl_file for further details. </p>
++
+ %PARAM tlsproxy_tls_always_issue_session_ids $smtpd_tls_always_issue_session_ids
+ 
+ <p> Force the Postfix tlsproxy(8) server to issue a TLS session id,
+diff --git a/src/global/mail_params.h b/src/global/mail_params.h
+index 96a3de5..015e5fe 100644
+--- a/src/global/mail_params.h
++++ b/src/global/mail_params.h
+@@ -1396,6 +1396,10 @@ extern char *var_smtpd_tls_CAfile;
+ #define DEF_SMTPD_TLS_CA_PATH	""
+ extern char *var_smtpd_tls_CApath;
+ 
++#define VAR_SMTPD_TLS_CRL_FILE	"smtpd_tls_crl_file"
++#define DEF_SMTPD_TLS_CRL_FILE	""
++extern char *var_smtpd_tls_crl_file;
++
+ #define VAR_SMTPD_TLS_PROTO		"smtpd_tls_protocols"
+ #define DEF_SMTPD_TLS_PROTO		">=TLSv1"
+ extern char *var_smtpd_tls_proto;
+@@ -4118,6 +4122,10 @@ extern char *var_tlsp_tls_CAfile;
+ #define DEF_TLSP_TLS_CA_PATH	"$" VAR_SMTPD_TLS_CA_PATH
+ extern char *var_tlsp_tls_CApath;
+ 
++#define VAR_TLSP_TLS_CRL_FILE	"tlsproxy_tls_crl_file"
++#define DEF_TLSP_TLS_CRL_FILE	"$" VAR_SMTPD_TLS_CRL_FILE
++extern char *var_tlsp_tls_crl_file;
++
+ #define VAR_TLSP_TLS_PROTO	"tlsproxy_tls_protocols"
+ #define DEF_TLSP_TLS_PROTO	"$" VAR_SMTPD_TLS_PROTO
+ extern char *var_tlsp_tls_proto;
+diff --git a/src/smtpd/smtpd.c b/src/smtpd/smtpd.c
+index ef1bc14..4b041be 100644
+--- a/src/smtpd/smtpd.c
++++ b/src/smtpd/smtpd.c
+@@ -394,6 +394,11 @@
+ /*	A directory containing (PEM format) CA certificates of root CAs
+ /*	trusted to sign either remote SMTP client certificates or intermediate CA
+ /*	certificates.
++/* .IP "\fBsmtpd_tls_crl_file (empty)\fR"
++/*	An optional PEM file with certificate revocation lists. A non-empty
++/*	value enables CRL checks for the entire remote SMTP client certificate
++/*	chain. Loading errors disable TLS support instead of silently skipping
++/*	revocation checks.
+ /* .IP "\fBsmtpd_tls_always_issue_session_ids (yes)\fR"
+ /*	Force the Postfix SMTP server to issue a TLS session id, even
+ /*	when TLS session caching is turned off (smtpd_tls_session_cache_database
+@@ -1503,6 +1508,7 @@ char   *var_smtpd_sasl_tls_opts;
+ int     var_smtpd_starttls_tmout;
+ char   *var_smtpd_tls_CAfile;
+ char   *var_smtpd_tls_CApath;
++char   *var_smtpd_tls_crl_file;
+ bool    var_smtpd_tls_ask_ccert;
+ int     var_smtpd_tls_ccert_vd;
+ char   *var_smtpd_tls_cert_file;
+@@ -6674,6 +6680,7 @@ static void pre_jail_init(char *unused_name, char **unused_argv)
+ 				    eckey_file = var_smtpd_tls_eckey_file,
+ 				    CAfile = var_smtpd_tls_CAfile,
+ 				    CApath = var_smtpd_tls_CApath,
++				    CRLfile = var_smtpd_tls_crl_file,
+ 				    dh1024_param_file
+ 				    = var_smtpd_tls_dh1024_param_file,
+ 				    dh512_param_file
+@@ -6952,6 +6959,7 @@ int     main(int argc, char **argv)
+ 	VAR_SMTPD_TLS_ECKEY_FILE, DEF_SMTPD_TLS_ECKEY_FILE, &var_smtpd_tls_eckey_file, 0, 0,
+ 	VAR_SMTPD_TLS_CA_FILE, DEF_SMTPD_TLS_CA_FILE, &var_smtpd_tls_CAfile, 0, 0,
+ 	VAR_SMTPD_TLS_CA_PATH, DEF_SMTPD_TLS_CA_PATH, &var_smtpd_tls_CApath, 0, 0,
++	VAR_SMTPD_TLS_CRL_FILE, DEF_SMTPD_TLS_CRL_FILE, &var_smtpd_tls_crl_file, 0, 0,
+ 	VAR_SMTPD_TLS_CIPH, DEF_SMTPD_TLS_CIPH, &var_smtpd_tls_ciph, 1, 0,
+ 	VAR_SMTPD_TLS_MAND_CIPH, DEF_SMTPD_TLS_MAND_CIPH, &var_smtpd_tls_mand_ciph, 1, 0,
+ 	VAR_SMTPD_TLS_EXCL_CIPH, DEF_SMTPD_TLS_EXCL_CIPH, &var_smtpd_tls_excl_ciph, 0, 0,
+diff --git a/src/smtpd/smtpd_sasl_glue.c b/src/smtpd/smtpd_sasl_glue.c
+index 1163366..c6a6b21 100644
+--- a/src/smtpd/smtpd_sasl_glue.c
++++ b/src/smtpd/smtpd_sasl_glue.c
+@@ -206,6 +206,9 @@ void    smtpd_sasl_activate(SMTPD_STATE *state, const char *sasl_opts_name,
+     const char *filtered_mechanism_list;
+     XSASL_SERVER_CREATE_ARGS create_args;
+     int     tls_flag;
++    int     tls_client_verified;
++    const char *tls_client_san_email;
++    const char *tls_client_fingerprint;
+ 
+     /*
+      * Sanity check.
+@@ -227,8 +230,16 @@ void    smtpd_sasl_activate(SMTPD_STATE *state, const char *sasl_opts_name,
+      */
+ #ifdef USE_TLS
+     tls_flag = state->tls_context != 0;
++    tls_client_verified = TLS_CERT_IS_TRUSTED(state->tls_context);
++    tls_client_san_email = tls_client_verified ?
++	state->tls_context->peer_rfc822name : 0;
++    tls_client_fingerprint = tls_client_verified ?
++	state->tls_context->peer_cert_fprint : 0;
+ #else
+     tls_flag = 0;
++    tls_client_verified = 0;
++    tls_client_san_email = 0;
++    tls_client_fingerprint = 0;
+ #endif
+ #define ADDR_OR_EMPTY(addr, unknown) (strcmp(addr, unknown) ? addr : "")
+ #define REALM_OR_NULL(realm) (*(realm) ? (realm) : (char *) 0)
+@@ -248,20 +259,31 @@ void    smtpd_sasl_activate(SMTPD_STATE *state, const char *sasl_opts_name,
+ 			     service = var_smtpd_sasl_service,
+ 			   user_realm = REALM_OR_NULL(var_smtpd_sasl_realm),
+ 			     security_options = sasl_opts_val,
+-			     tls_flag = tls_flag)) == 0)
++			     tls_flag = tls_flag,
++			     tls_client_verified = tls_client_verified,
++			     tls_client_san_email = tls_client_san_email,
++			     tls_client_fingerprint =
++				tls_client_fingerprint)) == 0)
+ 	msg_fatal("SASL per-connection initialization failed");
+ 
+     /*
+      * Get the list of authentication mechanisms.
+      */
+     if ((mechanism_list =
+-	 xsasl_server_get_mechanism_list(state->sasl_server)) == 0)
+-	msg_fatal("no SASL authentication mechanisms");
++	 xsasl_server_get_mechanism_list(state->sasl_server)) == 0) {
++	msg_info("no SASL authentication mechanisms available for %s",
++		 state->namaddr);
++	smtpd_sasl_deactivate(state);
++	return;
++    }
+     filtered_mechanism_list =
+ 	sasl_mech_filter(smtpd_sasl_mech_filter, mechanism_list);
+-    if (*filtered_mechanism_list == 0)
+-	msg_fatal("%s discards all mechanisms in '%s'",
+-		  VAR_SMTPD_SASL_MECH_FILTER, mechanism_list);
++    if (*filtered_mechanism_list == 0) {
++	msg_info("%s leaves no SASL authentication mechanisms available for %s",
++		 VAR_SMTPD_SASL_MECH_FILTER, state->namaddr);
++	smtpd_sasl_deactivate(state);
++	return;
++    }
+     state->sasl_mechanism_list = mystrdup(filtered_mechanism_list);
+ }
+ 
+diff --git a/src/tls/Makefile.in b/src/tls/Makefile.in
+index 328e25a..2099050 100644
+--- a/src/tls/Makefile.in
++++ b/src/tls/Makefile.in
+@@ -25,7 +25,7 @@ DEFS	= -I. -I$(INC_DIR) -D$(SYSTYPE)
+ CFLAGS	= $(DEBUG) $(OPT) $(DEFS)
+ INCL	=
+ LIB	= lib$(LIB_PREFIX)tls$(LIB_SUFFIX)
+-TESTPROG= tls_dh tls_mgr tls_dane tls_certkey
++TESTPROG= tls_dh tls_mgr tls_dane tls_certkey tls_external
+ 
+ LIBS	= ../../lib/lib$(LIB_PREFIX)dns$(LIB_SUFFIX) \
+ 	../../lib/lib$(LIB_PREFIX)global$(LIB_SUFFIX) \
+@@ -122,6 +122,9 @@ tls_certkey: $(LIB) $(LIBS)
+ 	$(CC) $(CFLAGS) -DTEST -o $@ $@.c $(LIB) $(LIBS) $(SYSLIBS)
+ 	mv junk $@.o
+ 
++tls_external: $(LIB) $(LIBS)
++	$(CC) $(CFLAGS) -DTEST -o $@ $@.c $(LIB) $(LIBS) $(SYSLIBS)
++
+ depend: $(MAKES)
+ 	(sed '1,/^# do not edit/!d' Makefile.in; \
+ 	set -e; for i in [a-z][a-z0-9]*.c; do \
+diff --git a/src/tls/tls.h b/src/tls/tls.h
+index 3326ffe..0aecb1f 100644
+--- a/src/tls/tls.h
++++ b/src/tls/tls.h
+@@ -238,6 +238,7 @@ extern int tls_dane_load_trustfile(TLS_DANE *, const char *);
+ typedef struct {
+     /* Public, read-only. */
+     char   *peer_CN;			/* Peer Common Name */
++    char   *peer_rfc822name;		/* Unique peer rfc822Name SAN */
+     char   *issuer_CN;			/* Issuer Common Name */
+     char   *peer_sni;			/* SNI sent to or by the peer */
+     char   *peer_cert_fprint;		/* ASCII certificate fingerprint */
+@@ -565,6 +566,7 @@ typedef struct {
+     const char *eckey_file;
+     const char *CAfile;
+     const char *CApath;
++    const char *CRLfile;
+     const char *protocols;
+     const char *eecdh_grade;
+     const char *dh1024_param_file;
+@@ -588,6 +590,7 @@ typedef struct {
+ } TLS_SERVER_START_PROPS;
+ 
+ extern TLS_APPL_STATE *tls_server_init(const TLS_SERVER_INIT_PROPS *);
++extern void tls_server_disable_resumption(SSL_CTX *, SSL_CTX *);
+ extern TLS_SESS_STATE *tls_server_start(const TLS_SERVER_START_PROPS *props);
+ extern TLS_SESS_STATE *tls_server_post_accept(TLS_SESS_STATE *);
+ 
+@@ -595,13 +597,13 @@ extern TLS_SESS_STATE *tls_server_post_accept(TLS_SESS_STATE *);
+ 	tls_session_stop(ctx, (stream), (timeout), (failure), (TLScontext))
+ 
+ #define TLS_SERVER_INIT(props, a1, a2, a3, a4, a5, a6, a7, a8, a9, \
+-    a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20) \
++    a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21) \
+     tls_server_init((((props)->a1), ((props)->a2), ((props)->a3), \
+     ((props)->a4), ((props)->a5), ((props)->a6), ((props)->a7), \
+     ((props)->a8), ((props)->a9), ((props)->a10), ((props)->a11), \
+     ((props)->a12), ((props)->a13), ((props)->a14), ((props)->a15), \
+     ((props)->a16), ((props)->a17), ((props)->a18), ((props)->a19), \
+-    ((props)->a20), (props)))
++    ((props)->a20), ((props)->a21), (props)))
+ 
+ #define TLS_SERVER_START(props, a1, a2, a3, a4, a5, a6, a7, a8, a9, \
+     a10, a11) \
+@@ -676,6 +678,7 @@ extern void tls_auto_groups(SSL_CTX *, const char *, const char *);
+   * tls_verify.c
+   */
+ extern char *tls_peer_CN(X509 *, const TLS_SESS_STATE *);
++extern char *tls_peer_rfc822name(X509 *, const TLS_SESS_STATE *);
+ extern char *tls_issuer_CN(X509 *, const TLS_SESS_STATE *);
+ extern int tls_verify_certificate_callback(int, X509_STORE_CTX *);
+ extern void tls_log_verify_error(TLS_SESS_STATE *, struct TLSRPT_WRAPPER *);
+diff --git a/src/tls/tls_external.c b/src/tls/tls_external.c
+new file mode 100644
+index 0000000..61bc9bc
+--- /dev/null
++++ b/src/tls/tls_external.c
+@@ -0,0 +1,142 @@
++#include <sys_defs.h>
++
++#ifdef USE_TLS
++
++#include <stdio.h>
++#include <string.h>
++
++#include <msg.h>
++#include <msg_vstream.h>
++#include <mymalloc.h>
++#include <vstream.h>
++
++#define TLS_INTERNAL
++#include <tls.h>
++
++typedef struct {
++    const unsigned char *data;
++    int     length;
++} TEST_MAILBOX;
++
++static X509 *make_certificate(const TEST_MAILBOX *mailboxes, int count)
++{
++    X509   *cert = X509_new();
++    general_name_stack_t *names;
++    GENERAL_NAME *name;
++    ASN1_IA5STRING *mailbox;
++    int     i;
++
++    if (cert == 0)
++	msg_fatal("X509_new failed");
++    if (count == 0)
++	return (cert);
++    if ((names = sk_GENERAL_NAME_new_null()) == 0)
++	msg_fatal("sk_GENERAL_NAME_new_null failed");
++    for (i = 0; i < count; i++) {
++	if ((name = GENERAL_NAME_new()) == 0
++	    || (mailbox = ASN1_IA5STRING_new()) == 0
++	    || !ASN1_STRING_set(mailbox, mailboxes[i].data,
++				mailboxes[i].length))
++	    msg_fatal("cannot construct rfc822Name");
++	GENERAL_NAME_set0_value(name, GEN_EMAIL, mailbox);
++	if (!sk_GENERAL_NAME_push(names, name))
++	    msg_fatal("cannot append rfc822Name");
++    }
++    if (!X509_add1_ext_i2d(cert, NID_subject_alt_name, names, 0, 0))
++	msg_fatal("cannot add subjectAltName extension");
++    GENERAL_NAMES_free(names);
++    return (cert);
++}
++
++static void check_identity(const char *label, const TEST_MAILBOX *mailboxes,
++			           int count, const char *expected)
++{
++    TLS_SESS_STATE context;
++    X509   *cert;
++    char   *actual;
++
++    memset(&context, 0, sizeof(context));
++    context.namaddr = "unit-test";
++    cert = make_certificate(mailboxes, count);
++    actual = tls_peer_rfc822name(cert, &context);
++    if (strcmp(actual, expected) != 0)
++	msg_fatal("%s: expected <%s>, got <%s>", label, expected, actual);
++    myfree(actual);
++    X509_free(cert);
++}
++
++static void check_resumption_disabled(void)
++{
++    SSL_CTX *server_ctx = SSL_CTX_new(TLS_server_method());
++    SSL_CTX *sni_ctx = SSL_CTX_new(TLS_server_method());
++
++    if (server_ctx == 0 || sni_ctx == 0)
++	msg_fatal("SSL_CTX_new failed");
++    SSL_CTX_set_num_tickets(server_ctx, 2);
++    SSL_CTX_set_num_tickets(sni_ctx, 2);
++    SSL_CTX_set_session_cache_mode(server_ctx, SSL_SESS_CACHE_SERVER);
++    SSL_CTX_set_session_cache_mode(sni_ctx, SSL_SESS_CACHE_SERVER);
++    tls_server_disable_resumption(server_ctx, sni_ctx);
++    if ((SSL_CTX_get_options(server_ctx) & SSL_OP_NO_TICKET) == 0
++	|| (SSL_CTX_get_options(sni_ctx) & SSL_OP_NO_TICKET) == 0
++	|| SSL_CTX_get_num_tickets(server_ctx) != 0
++	|| SSL_CTX_get_num_tickets(sni_ctx) != 0
++	|| SSL_CTX_get_session_cache_mode(server_ctx) != SSL_SESS_CACHE_OFF
++	|| SSL_CTX_get_session_cache_mode(sni_ctx) != SSL_SESS_CACHE_OFF)
++	msg_fatal("CRL policy did not disable all TLS session resumption");
++    SSL_CTX_free(server_ctx);
++    SSL_CTX_free(sni_ctx);
++}
++
++int     main(int argc, char **argv)
++{
++    static const unsigned char alice[] = "alice@example.test";
++    static const unsigned char bob[] = "bob@example.test";
++    static const unsigned char with_nul[] = "alice\0@example.test";
++    static const unsigned char with_tab[] = "alice\t@example.test";
++    static const unsigned char with_cr[] = "alice\r@example.test";
++    static const unsigned char with_lf[] = "alice\n@example.test";
++    static const unsigned char non_ascii[] = {
++	'a', 'l', 'i', 'c', 'e', 0x80, '@', 'e', 'x', 'a', 'm', 'p', 'l', 'e'
++    };
++    static const TEST_MAILBOX one[] = {
++	{alice, sizeof(alice) - 1}
++    };
++    static const TEST_MAILBOX duplicate[] = {
++	{alice, sizeof(alice) - 1}, {alice, sizeof(alice) - 1}
++    };
++    static const TEST_MAILBOX distinct[] = {
++	{alice, sizeof(alice) - 1}, {bob, sizeof(bob) - 1}
++    };
++    static const TEST_MAILBOX nul_value[] = {
++	{with_nul, sizeof(with_nul) - 1}
++    };
++    static const TEST_MAILBOX tab_value[] = {
++	{with_tab, sizeof(with_tab) - 1}
++    };
++    static const TEST_MAILBOX cr_value[] = {
++	{with_cr, sizeof(with_cr) - 1}
++    };
++    static const TEST_MAILBOX lf_value[] = {
++	{with_lf, sizeof(with_lf) - 1}
++    };
++    static const TEST_MAILBOX non_ascii_value[] = {
++	{non_ascii, sizeof(non_ascii)}
++    };
++
++    msg_vstream_init(argv[0], VSTREAM_ERR);
++    check_identity("single", one, 1, (const char *) alice);
++    check_identity("duplicate", duplicate, 2, (const char *) alice);
++    check_identity("distinct", distinct, 2, "");
++    check_identity("absent", 0, 0, "");
++    check_identity("NUL", nul_value, 1, "");
++    check_identity("TAB", tab_value, 1, "");
++    check_identity("CR", cr_value, 1, "");
++    check_identity("LF", lf_value, 1, "");
++    check_identity("non-ASCII", non_ascii_value, 1, "");
++    check_resumption_disabled();
++    vstream_fprintf(VSTREAM_OUT, "tls_external: PASS\n");
++    return (0);
++}
++
++#endif
+diff --git a/src/tls/tls_misc.c b/src/tls/tls_misc.c
+index a9d2916..c688253 100644
+--- a/src/tls/tls_misc.c
++++ b/src/tls/tls_misc.c
+@@ -1350,6 +1350,7 @@ TLS_SESS_STATE *tls_alloc_sess_context(int log_mask, const char *namaddr)
+     TLScontext->cache_type = 0;
+     TLScontext->serverid = 0;
+     TLScontext->peer_CN = 0;
++    TLScontext->peer_rfc822name = 0;
+     TLScontext->issuer_CN = 0;
+     TLScontext->peer_sni = 0;
+     TLScontext->peer_cert_fprint = 0;
+@@ -1399,6 +1400,8 @@ void    tls_free_context(TLS_SESS_STATE *TLScontext)
+ 
+     if (TLScontext->peer_CN)
+ 	myfree(TLScontext->peer_CN);
++    if (TLScontext->peer_rfc822name)
++	myfree(TLScontext->peer_rfc822name);
+     if (TLScontext->issuer_CN)
+ 	myfree(TLScontext->issuer_CN);
+     if (TLScontext->peer_sni)
+diff --git a/src/tls/tls_proxy.h b/src/tls/tls_proxy.h
+index d5cbdb4..ef7df2e 100644
+--- a/src/tls/tls_proxy.h
++++ b/src/tls/tls_proxy.h
+@@ -158,6 +158,7 @@ extern void tls_proxy_server_start_free(TLS_SERVER_START_PROPS *);
+   * TLS_SESS_STATE attributes.
+   */
+ #define TLS_ATTR_PEER_CN	"peer_CN"
++#define TLS_ATTR_PEER_RFC822NAME "peer_rfc822name"
+ #define TLS_ATTR_ISSUER_CN	"issuer_CN"
+ #define TLS_ATTR_PEER_CERT_FPT	"peer_fingerprint"
+ #define TLS_ATTR_PEER_PKEY_FPT	"peer_pubkey_fingerprint"
+@@ -200,6 +201,7 @@ extern void tls_proxy_server_start_free(TLS_SERVER_START_PROPS *);
+ #define TLS_ATTR_ECKEY_FILE	"eckey_file"
+ #define TLS_ATTR_CAFILE		"CAfile"
+ #define TLS_ATTR_CAPATH		"CApath"
++#define TLS_ATTR_CRLFILE	"CRLfile"
+ #define TLS_ATTR_PROTOCOLS	"protocols"
+ #define TLS_ATTR_EECDH_GRADE	"eecdh_grade"
+ #define TLS_ATTR_DH1K_PARAM_FILE "dh1024_param_file"
+diff --git a/src/tls/tls_proxy_context_print.c b/src/tls/tls_proxy_context_print.c
+index 808abbe..33f34a2 100644
+--- a/src/tls/tls_proxy_context_print.c
++++ b/src/tls/tls_proxy_context_print.c
+@@ -64,6 +64,8 @@ int     tls_proxy_context_print(ATTR_PRINT_COMMON_FN print_fn, VSTREAM *fp,
+     ret = print_fn(fp, flags | ATTR_FLAG_MORE,
+ 		   SEND_ATTR_STR(TLS_ATTR_PEER_CN,
+ 				 STRING_OR_EMPTY(tp->peer_CN)),
++		   SEND_ATTR_STR(TLS_ATTR_PEER_RFC822NAME,
++				 STRING_OR_EMPTY(tp->peer_rfc822name)),
+ 		   SEND_ATTR_STR(TLS_ATTR_ISSUER_CN,
+ 				 STRING_OR_EMPTY(tp->issuer_CN)),
+ 		   SEND_ATTR_STR(TLS_ATTR_PEER_CERT_FPT,
+diff --git a/src/tls/tls_proxy_context_scan.c b/src/tls/tls_proxy_context_scan.c
+index fc23c52..1b9ae76 100644
+--- a/src/tls/tls_proxy_context_scan.c
++++ b/src/tls/tls_proxy_context_scan.c
+@@ -73,6 +73,7 @@ int     tls_proxy_context_scan(ATTR_SCAN_COMMON_FN scan_fn, VSTREAM *fp,
+     = (TLS_SESS_STATE *) mymalloc(sizeof(*tls_context));;
+     int     ret;
+     VSTRING *peer_CN = vstring_alloc(25);
++    VSTRING *peer_rfc822name = vstring_alloc(100);
+     VSTRING *issuer_CN = vstring_alloc(25);
+     VSTRING *peer_cert_fprint = vstring_alloc(60);	/* 60 for SHA-1 */
+     VSTRING *peer_pkey_fprint = vstring_alloc(60);	/* 60 for SHA-1 */
+@@ -97,6 +98,8 @@ int     tls_proxy_context_scan(ATTR_SCAN_COMMON_FN scan_fn, VSTREAM *fp,
+     memset(tls_context, 0, sizeof(*tls_context));
+     ret = scan_fn(fp, flags | ATTR_FLAG_MORE,
+ 		  RECV_ATTR_STR(TLS_ATTR_PEER_CN, peer_CN),
++		  RECV_ATTR_STR(TLS_ATTR_PEER_RFC822NAME,
++				peer_rfc822name),
+ 		  RECV_ATTR_STR(TLS_ATTR_ISSUER_CN, issuer_CN),
+ 		  RECV_ATTR_STR(TLS_ATTR_PEER_CERT_FPT, peer_cert_fprint),
+ 		  RECV_ATTR_STR(TLS_ATTR_PEER_PKEY_FPT, peer_pkey_fprint),
+@@ -129,6 +132,7 @@ int     tls_proxy_context_scan(ATTR_SCAN_COMMON_FN scan_fn, VSTREAM *fp,
+ 		  ATTR_TYPE_END);
+     /* Always construct a well-formed structure. */
+     tls_context->peer_CN = vstring_export(peer_CN);
++    tls_context->peer_rfc822name = vstring_export(peer_rfc822name);
+     tls_context->issuer_CN = vstring_export(issuer_CN);
+     tls_context->peer_cert_fprint = vstring_export(peer_cert_fprint);
+     tls_context->peer_pkey_fprint = vstring_export(peer_pkey_fprint);
+@@ -143,7 +147,7 @@ int     tls_proxy_context_scan(ATTR_SCAN_COMMON_FN scan_fn, VSTREAM *fp,
+     tls_context->srvr_sig_curve = vstring_export(srvr_sig_curve);
+     tls_context->srvr_sig_dgst = vstring_export(srvr_sig_dgst);
+     tls_context->namaddr = vstring_export(namaddr);
+-    ret = (ret == 25 ? 1 : -1);
++    ret = (ret == 26 ? 1 : -1);
+     if (ret != 1) {
+ 	tls_proxy_context_free(tls_context);
+ 	tls_context = 0;
+@@ -160,6 +164,8 @@ void    tls_proxy_context_free(TLS_SESS_STATE *tls_context)
+ {
+     if (tls_context->peer_CN)
+ 	myfree(tls_context->peer_CN);
++    if (tls_context->peer_rfc822name)
++	myfree(tls_context->peer_rfc822name);
+     if (tls_context->issuer_CN)
+ 	myfree(tls_context->issuer_CN);
+     if (tls_context->peer_cert_fprint)
+diff --git a/src/tls/tls_proxy_server_print.c b/src/tls/tls_proxy_server_print.c
+index 8d51422..465dcbe 100644
+--- a/src/tls/tls_proxy_server_print.c
++++ b/src/tls/tls_proxy_server_print.c
+@@ -96,6 +96,8 @@ int     tls_proxy_server_init_print(ATTR_PRINT_COMMON_FN print_fn, VSTREAM *fp,
+ 				 STRING_OR_EMPTY(props->CAfile)),
+ 		   SEND_ATTR_STR(TLS_ATTR_CAPATH,
+ 				 STRING_OR_EMPTY(props->CApath)),
++		   SEND_ATTR_STR(TLS_ATTR_CRLFILE,
++				 STRING_OR_EMPTY(props->CRLfile)),
+ 		   SEND_ATTR_STR(TLS_ATTR_PROTOCOLS,
+ 				 STRING_OR_EMPTY(props->protocols)),
+ 		   SEND_ATTR_STR(TLS_ATTR_EECDH_GRADE,
+diff --git a/src/tls/tls_proxy_server_scan.c b/src/tls/tls_proxy_server_scan.c
+index 92da66c..76fb11d 100644
+--- a/src/tls/tls_proxy_server_scan.c
++++ b/src/tls/tls_proxy_server_scan.c
+@@ -101,6 +101,7 @@ int     tls_proxy_server_init_scan(ATTR_SCAN_COMMON_FN scan_fn, VSTREAM *fp,
+     VSTRING *eckey_file = vstring_alloc(25);
+     VSTRING *CAfile = vstring_alloc(25);
+     VSTRING *CApath = vstring_alloc(25);
++    VSTRING *CRLfile = vstring_alloc(25);
+     VSTRING *protocols = vstring_alloc(25);
+     VSTRING *eecdh_grade = vstring_alloc(25);
+     VSTRING *dh1024_param_file = vstring_alloc(25);
+@@ -126,6 +127,7 @@ int     tls_proxy_server_init_scan(ATTR_SCAN_COMMON_FN scan_fn, VSTREAM *fp,
+ 		  RECV_ATTR_STR(TLS_ATTR_ECKEY_FILE, eckey_file),
+ 		  RECV_ATTR_STR(TLS_ATTR_CAFILE, CAfile),
+ 		  RECV_ATTR_STR(TLS_ATTR_CAPATH, CApath),
++		  RECV_ATTR_STR(TLS_ATTR_CRLFILE, CRLfile),
+ 		  RECV_ATTR_STR(TLS_ATTR_PROTOCOLS, protocols),
+ 		  RECV_ATTR_STR(TLS_ATTR_EECDH_GRADE, eecdh_grade),
+ 		  RECV_ATTR_STR(TLS_ATTR_DH1K_PARAM_FILE, dh1024_param_file),
+@@ -146,12 +148,13 @@ int     tls_proxy_server_init_scan(ATTR_SCAN_COMMON_FN scan_fn, VSTREAM *fp,
+     props->eckey_file = vstring_export(eckey_file);
+     props->CAfile = vstring_export(CAfile);
+     props->CApath = vstring_export(CApath);
++    props->CRLfile = vstring_export(CRLfile);
+     props->protocols = vstring_export(protocols);
+     props->eecdh_grade = vstring_export(eecdh_grade);
+     props->dh1024_param_file = vstring_export(dh1024_param_file);
+     props->dh512_param_file = vstring_export(dh512_param_file);
+     props->mdalg = vstring_export(mdalg);
+-    ret = (ret == 20 ? 1 : -1);
++    ret = (ret == 21 ? 1 : -1);
+     if (ret != 1) {
+ 	tls_proxy_server_init_free(props);
+ 	props = 0;
+@@ -176,6 +179,7 @@ void    tls_proxy_server_init_free(TLS_SERVER_INIT_PROPS *props)
+     myfree((void *) props->eckey_file);
+     myfree((void *) props->CAfile);
+     myfree((void *) props->CApath);
++    myfree((void *) props->CRLfile);
+     myfree((void *) props->protocols);
+     myfree((void *) props->eecdh_grade);
+     myfree((void *) props->dh1024_param_file);
+diff --git a/src/tls/tls_server.c b/src/tls/tls_server.c
+index 2b37f40..870a378 100644
+--- a/src/tls/tls_server.c
++++ b/src/tls/tls_server.c
+@@ -167,6 +167,18 @@
+   */
+ static const char server_session_id_context[] = "Postfix/TLS";
+ 
++/* tls_server_disable_resumption - disable all server-side TLS resumption */
++
++void    tls_server_disable_resumption(SSL_CTX *server_ctx, SSL_CTX *sni_ctx)
++{
++    SSL_CTX_set_options(server_ctx, SSL_OP_NO_TICKET);
++    SSL_CTX_set_options(sni_ctx, SSL_OP_NO_TICKET);
++    SSL_CTX_set_num_tickets(server_ctx, 0);
++    SSL_CTX_set_num_tickets(sni_ctx, 0);
++    SSL_CTX_set_session_cache_mode(server_ctx, SSL_SESS_CACHE_OFF);
++    SSL_CTX_set_session_cache_mode(sni_ctx, SSL_SESS_CACHE_OFF);
++}
++
+ #ifndef OPENSSL_NO_TLSEXT
+ 
+  /*
+@@ -397,6 +409,7 @@ TLS_APPL_STATE *tls_server_init(const TLS_SERVER_INIT_PROPS *props)
+     int     cachable;
+     int     scache_timeout;
+     int     ticketable = 0;
++    int     crl_checks_enabled;
+     int     protomask;
+     int     min_proto;
+     int     max_proto;
+@@ -507,6 +520,7 @@ TLS_APPL_STATE *tls_server_init(const TLS_SERVER_INIT_PROPS *props)
+      */
+     SSL_CTX_set_verify_depth(server_ctx, props->verifydepth + 1);
+     SSL_CTX_set_verify_depth(sni_ctx, props->verifydepth + 1);
++    crl_checks_enabled = props->CRLfile && *props->CRLfile;
+ 
+     /*
+      * The session cache is implemented by the tlsmgr(8) server.
+@@ -523,6 +537,10 @@ TLS_APPL_STATE *tls_server_init(const TLS_SERVER_INIT_PROPS *props)
+ 	scache_timeout = 0;
+     if (scache_timeout <= 0)
+ 	cachable = 0;
++    if (crl_checks_enabled) {
++	cachable = 0;
++	scache_timeout = 0;
++    }
+ 
+     /*
+      * Presently we use TLS only with SMTP where truncation attacks are not
+@@ -638,6 +656,35 @@ TLS_APPL_STATE *tls_server_init(const TLS_SERVER_INIT_PROPS *props)
+ 	return (0);
+     }
+ 
++    /*
++     * SSL_CTX_load_verify_locations() loads trust anchors but does not turn
++     * on revocation checks. A non-empty CRLfile opts into full-chain CRL
++     * checking. Loading or enabling the CRLs is all-or-nothing: otherwise a
++     * revoked client certificate could become available to SASL EXTERNAL.
++     */
++    if (crl_checks_enabled) {
++	X509_LOOKUP *lookup;
++	int     crl_count;
++
++	cert_store = SSL_CTX_get_cert_store(server_ctx);
++	lookup = X509_STORE_add_lookup(cert_store, X509_LOOKUP_file());
++	crl_count = lookup ?
++	    X509_load_crl_file(lookup, props->CRLfile, X509_FILETYPE_PEM) : 0;
++	if (crl_count <= 0
++	    || !X509_STORE_set_flags(cert_store,
++				     X509_V_FLAG_CRL_CHECK
++				     | X509_V_FLAG_CRL_CHECK_ALL)) {
++	    msg_info("cannot load or enable client certificate CRLs from %s: "
++		     "disabling TLS support", props->CRLfile);
++	    tls_print_errors();
++	    SSL_CTX_free(server_ctx);
++	    SSL_CTX_free(sni_ctx);
++	    return (0);
++	}
++	msg_info("enabled full-chain client certificate CRL checking from %s",
++		 props->CRLfile);
++    }
++
+     /*
+      * Always support server->client raw public keys, if they're good enough
+      * for the client, they're good enough for us.
+@@ -811,6 +858,11 @@ TLS_APPL_STATE *tls_server_init(const TLS_SERVER_INIT_PROPS *props)
+ 	 */
+ 	SSL_CTX_set_session_cache_mode(server_ctx, SSL_SESS_CACHE_OFF);
+     }
++    if (crl_checks_enabled) {
++	tls_server_disable_resumption(server_ctx, sni_ctx);
++	msg_info("disabled TLS session resumption while client certificate "
++		 "CRL checking is enabled");
++    }
+ 
+     return (app_ctx);
+ }
+@@ -1008,6 +1060,8 @@ TLS_SESS_STATE *tls_server_post_accept(TLS_SESS_STATE *TLScontext)
+ 	    msg_info("issuer=%s", printable(buf, '?'));
+ 	}
+ 	TLScontext->peer_CN = tls_peer_CN(peer, TLScontext);
++	TLScontext->peer_rfc822name =
++	    tls_peer_rfc822name(peer, TLScontext);
+ 	TLScontext->issuer_CN = tls_issuer_CN(peer, TLScontext);
+ 	TLScontext->peer_cert_fprint =
+ 	    tls_cert_fprint(peer, TLScontext->mdalg);
+@@ -1046,6 +1100,7 @@ TLS_SESS_STATE *tls_server_post_accept(TLS_SESS_STATE *TLScontext)
+ 	}
+     } else {
+ 	TLScontext->peer_CN = mystrdup("");
++	TLScontext->peer_rfc822name = mystrdup("");
+ 	TLScontext->issuer_CN = mystrdup("");
+ 	TLScontext->peer_cert_fprint = mystrdup("");
+ 	if (!pkey) {
+diff --git a/src/tls/tls_verify.c b/src/tls/tls_verify.c
+index e6ff29f..ca0f76b 100644
+--- a/src/tls/tls_verify.c
++++ b/src/tls/tls_verify.c
+@@ -19,6 +19,10 @@
+ /*	X509   *peercert;
+ /*	TLS_SESS_STATE *TLScontext;
+ /*
++/*	char *tls_peer_rfc822name(peercert, TLScontext)
++/*	X509   *peercert;
++/*	TLS_SESS_STATE *TLScontext;
++/*
+ /*	char *tls_issuer_CN(peercert, TLScontext)
+ /*	X509   *peercert;
+ /*	TLS_SESS_STATE *TLScontext;
+@@ -41,6 +45,12 @@
+ /*	freed by the caller; it contains UTF-8 without non-printable
+ /*	ASCII characters.
+ /*
++/*	tls_peer_rfc822name() returns the sole distinct rfc822Name from the
++/*	peer certificate subjectAltName extension, or an empty string when the
++/*	extension has no rfc822Name, has multiple distinct rfc822Names, or has
++/*	content that is unsafe for a tab-delimited protocol. The result is
++/*	allocated with mymalloc() and must be freed by the caller.
++/*
+ /*	tls_issuer_CN() returns the text CommonName for the peer
+ /*	certificate issuer, or an empty string if no CommonName was
+ /*	found. The result is allocated with mymalloc() and must be
+@@ -509,6 +519,70 @@ char   *tls_peer_CN(X509 *peercert, const TLS_SESS_STATE *TLScontext)
+     return (cn ? cn : mystrdup(""));
+ }
+ 
++/* tls_peer_rfc822name - extract unique, wire-safe rfc822Name SAN */
++
++char   *tls_peer_rfc822name(X509 *peercert,
++			            const TLS_SESS_STATE *TLScontext)
++{
++    const char *myname = "tls_peer_rfc822name";
++    general_name_stack_t *names;
++    const GENERAL_NAME *name;
++    const ASN1_IA5STRING *mailbox;
++    const unsigned char *data;
++    char   *result = 0;
++    int     crit = -1;
++    int     count;
++    int     length;
++    int     i;
++    int     j;
++
++    names = X509_get_ext_d2i(peercert, NID_subject_alt_name, &crit, 0);
++    if (names == 0)
++	return (mystrdup(""));
++
++    count = sk_GENERAL_NAME_num(names);
++    for (i = 0; i < count; i++) {
++	name = sk_GENERAL_NAME_value(names, i);
++	if (name->type != GEN_EMAIL)
++	    continue;
++	mailbox = name->d.rfc822Name;
++	length = ASN1_STRING_length(mailbox);
++	data = ASN1_STRING_get0_data(mailbox);
++	if (length <= 0 || length >= CCERT_BUFSIZ || data == 0) {
++	    msg_warn("%s: %s: invalid rfc822Name SAN length",
++		     myname, TLScontext->namaddr);
++	    if (result)
++		myfree(result);
++	    result = 0;
++	    break;
++	}
++	for (j = 0; j < length; j++) {
++	    if (!ISASCII(data[j]) || !ISPRINT(data[j])) {
++		msg_warn("%s: %s: unsafe content in rfc822Name SAN",
++			 myname, TLScontext->namaddr);
++		if (result)
++		    myfree(result);
++		result = 0;
++		break;
++	    }
++	}
++	if (j != length)
++	    break;
++	if (result == 0) {
++	    result = mystrndup((const char *) data, length);
++	} else if ((int) strlen(result) != length
++		   || memcmp(result, data, length) != 0) {
++	    msg_warn("%s: %s: multiple distinct rfc822Name SAN values",
++		     myname, TLScontext->namaddr);
++	    myfree(result);
++	    result = 0;
++	    break;
++	}
++    }
++    GENERAL_NAMES_free(names);
++    return (result ? result : mystrdup(""));
++}
++
+ /* tls_issuer_CN - extract issuer common name from certificate */
+ 
+ char   *tls_issuer_CN(X509 *peer, const TLS_SESS_STATE *TLScontext)
+diff --git a/src/tlsproxy/tlsproxy.c b/src/tlsproxy/tlsproxy.c
+index cef9a4f..f73f334 100644
+--- a/src/tlsproxy/tlsproxy.c
++++ b/src/tlsproxy/tlsproxy.c
+@@ -168,6 +168,10 @@
+ /*	A directory containing (PEM format) CA certificates of root CAs
+ /*	trusted to sign either remote SMTP client certificates or intermediate
+ /*	CA certificates.
++/* .IP "\fBtlsproxy_tls_crl_file ($smtpd_tls_crl_file)\fR"
++/*	An optional PEM file with certificate revocation lists. A non-empty
++/*	value enables full-chain CRL checking for remote SMTP client
++/*	certificates.
+ /* .IP "\fBtlsproxy_tls_always_issue_session_ids ($smtpd_tls_always_issue_session_ids)\fR"
+ /*	Force the Postfix \fBtlsproxy\fR(8) server to issue a TLS session id,
+ /*	even when TLS session caching is turned off.
+@@ -455,6 +459,7 @@ char   *var_smtpd_tls_eccert_file;
+ char   *var_smtpd_tls_eckey_file;
+ char   *var_smtpd_tls_CAfile;
+ char   *var_smtpd_tls_CApath;
++char   *var_smtpd_tls_crl_file;
+ char   *var_smtpd_tls_ciph;
+ char   *var_smtpd_tls_mand_ciph;
+ char   *var_smtpd_tls_excl_ciph;
+@@ -484,6 +489,7 @@ char   *var_tlsp_tls_eccert_file;
+ char   *var_tlsp_tls_eckey_file;
+ char   *var_tlsp_tls_CAfile;
+ char   *var_tlsp_tls_CApath;
++char   *var_tlsp_tls_crl_file;
+ char   *var_tlsp_tls_ciph;
+ char   *var_tlsp_tls_mand_ciph;
+ char   *var_tlsp_tls_excl_ciph;
+@@ -1661,6 +1667,7 @@ static void pre_jail_init_server(void)
+ 			    eckey_file = var_tlsp_tls_eckey_file,
+ 			    CAfile = var_tlsp_tls_CAfile,
+ 			    CApath = var_tlsp_tls_CApath,
++			    CRLfile = var_tlsp_tls_crl_file,
+ 			    dh1024_param_file
+ 			    = var_tlsp_tls_dh1024_param_file,
+ 			    dh512_param_file
+@@ -1894,6 +1901,7 @@ int     main(int argc, char **argv)
+ 	VAR_SMTPD_TLS_ECKEY_FILE, DEF_SMTPD_TLS_ECKEY_FILE, &var_smtpd_tls_eckey_file, 0, 0,
+ 	VAR_SMTPD_TLS_CA_FILE, DEF_SMTPD_TLS_CA_FILE, &var_smtpd_tls_CAfile, 0, 0,
+ 	VAR_SMTPD_TLS_CA_PATH, DEF_SMTPD_TLS_CA_PATH, &var_smtpd_tls_CApath, 0, 0,
++	VAR_SMTPD_TLS_CRL_FILE, DEF_SMTPD_TLS_CRL_FILE, &var_smtpd_tls_crl_file, 0, 0,
+ 	VAR_SMTPD_TLS_CIPH, DEF_SMTPD_TLS_CIPH, &var_smtpd_tls_ciph, 1, 0,
+ 	VAR_SMTPD_TLS_MAND_CIPH, DEF_SMTPD_TLS_MAND_CIPH, &var_smtpd_tls_mand_ciph, 1, 0,
+ 	VAR_SMTPD_TLS_EXCL_CIPH, DEF_SMTPD_TLS_EXCL_CIPH, &var_smtpd_tls_excl_ciph, 0, 0,
+@@ -1932,6 +1940,7 @@ int     main(int argc, char **argv)
+ 	VAR_TLSP_TLS_ECKEY_FILE, DEF_TLSP_TLS_ECKEY_FILE, &var_tlsp_tls_eckey_file, 0, 0,
+ 	VAR_TLSP_TLS_CA_FILE, DEF_TLSP_TLS_CA_FILE, &var_tlsp_tls_CAfile, 0, 0,
+ 	VAR_TLSP_TLS_CA_PATH, DEF_TLSP_TLS_CA_PATH, &var_tlsp_tls_CApath, 0, 0,
++	VAR_TLSP_TLS_CRL_FILE, DEF_TLSP_TLS_CRL_FILE, &var_tlsp_tls_crl_file, 0, 0,
+ 	VAR_TLSP_TLS_CIPH, DEF_TLSP_TLS_CIPH, &var_tlsp_tls_ciph, 1, 0,
+ 	VAR_TLSP_TLS_MAND_CIPH, DEF_TLSP_TLS_MAND_CIPH, &var_tlsp_tls_mand_ciph, 1, 0,
+ 	VAR_TLSP_TLS_EXCL_CIPH, DEF_TLSP_TLS_EXCL_CIPH, &var_tlsp_tls_excl_ciph, 0, 0,
+diff --git a/src/xsasl/xsasl.h b/src/xsasl/xsasl.h
+index b494d7e..06e6f7a 100644
+--- a/src/xsasl/xsasl.h
++++ b/src/xsasl/xsasl.h
+@@ -55,6 +55,9 @@ typedef struct XSASL_SERVER_CREATE_ARGS {
+     const char *user_realm;
+     const char *security_options;
+     int     tls_flag;
++    int     tls_client_verified;
++    const char *tls_client_san_email;
++    const char *tls_client_fingerprint;
+ } XSASL_SERVER_CREATE_ARGS;
+ 
+ typedef struct XSASL_SERVER_IMPL {
+@@ -67,10 +70,11 @@ extern ARGV *xsasl_server_types(void);
+ 
+ #define xsasl_server_create(impl, args) \
+ 	(impl)->create((impl), (args))
+-#define XSASL_SERVER_CREATE(impl, args, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) \
++#define XSASL_SERVER_CREATE(impl, args, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13) \
+ 	xsasl_server_create((impl), (((args)->a1), ((args)->a2), ((args)->a3), \
+ 	((args)->a4), ((args)->a5), ((args)->a6), ((args)->a7), ((args)->a8), \
+-	((args)->a9), ((args)->a10), (args)))
++	((args)->a9), ((args)->a10), ((args)->a11), ((args)->a12), \
++	((args)->a13), (args)))
+ #define xsasl_server_done(impl) (impl)->done((impl));
+ 
+  /*
+diff --git a/src/xsasl/xsasl_dovecot_server.c b/src/xsasl/xsasl_dovecot_server.c
+index e9c1646..23f3756 100644
+--- a/src/xsasl/xsasl_dovecot_server.c
++++ b/src/xsasl/xsasl_dovecot_server.c
+@@ -167,6 +167,9 @@ typedef struct {
+     VSTRING *sasl_line;
+     unsigned int sec_props;		/* Postfix mechanism filter */
+     int     tls_flag;			/* TLS enabled in this session */
++    int     tls_client_verified;	/* peer certificate chain verified */
++    char   *tls_client_san_email;	/* sole distinct rfc822Name SAN */
++    char   *tls_client_fingerprint;/* certificate fingerprint */
+     char   *mechanism_list;		/* filtered mechanism list */
+     ARGV   *mechanism_argv;		/* ditto */
+     char   *client_addr;		/* remote IP address */
+@@ -222,7 +225,8 @@ static void xsasl_dovecot_server_mech_free(XSASL_DCSRV_MECH *mech_list)
+ 
+ static char *xsasl_dovecot_server_mech_filter(ARGV *mechanism_argv,
+ 				           XSASL_DCSRV_MECH *mechanism_list,
+-					            unsigned int conf_props)
++					            unsigned int conf_props,
++					            int external_available)
+ {
+     const char *myname = "xsasl_dovecot_server_mech_filter";
+     unsigned int pos_conf_props = (conf_props & SEC_PROPS_POS_MASK);
+@@ -234,6 +238,13 @@ static char *xsasl_dovecot_server_mech_filter(ARGV *mechanism_argv,
+      * Match Postfix properties against Dovecot server properties.
+      */
+     for (mp = mechanism_list; mp != 0; mp = mp->next) {
++	if (strcasecmp(mp->mech_name, "EXTERNAL") == 0
++	    && external_available == 0) {
++	    if (msg_verbose)
++		msg_info("%s: skip mechanism without verified client identity: %s",
++			 myname, mp->mech_name);
++	    continue;
++	}
+ 	if ((mp->sec_props & pos_conf_props) == pos_conf_props
+ 	    && (mp->sec_props & neg_conf_props) == 0) {
+ 	    if (VSTRING_LEN(mechanisms_str) > 0)
+@@ -453,6 +464,12 @@ static XSASL_SERVER *xsasl_dovecot_server_create(XSASL_SERVER_IMPL *impl,
+     server->mechanism_list = 0;
+     server->mechanism_argv = 0;
+     server->tls_flag = args->tls_flag;
++    server->tls_client_verified = args->tls_client_verified;
++    server->tls_client_san_email =
++	mystrdup(args->tls_client_san_email ? args->tls_client_san_email : "");
++    server->tls_client_fingerprint =
++	mystrdup(args->tls_client_fingerprint ?
++		 args->tls_client_fingerprint : "");
+     server->sec_props =
+ 	name_mask_opt(myname, xsasl_dovecot_conf_sec_props,
+ 		      args->security_options,
+@@ -490,7 +507,10 @@ static const char *xsasl_dovecot_server_get_mechanism_list(XSASL_SERVER *xp)
+ 	server->mechanism_list =
+ 	    xsasl_dovecot_server_mech_filter(server->mechanism_argv,
+ 					     server->impl->mechanism_list,
+-					     server->sec_props);
++					     server->sec_props,
++					     server->tls_client_verified
++					     && *server->tls_client_san_email
++					     && *server->tls_client_fingerprint);
+     }
+     return (server->mechanism_list[0] ? server->mechanism_list : 0);
+ }
+@@ -509,6 +529,8 @@ static void xsasl_dovecot_server_free(XSASL_SERVER *xp)
+ 	argv_free(server->mechanism_argv);
+     }
+     myfree(server->service);
++    myfree(server->tls_client_san_email);
++    myfree(server->tls_client_fingerprint);
+     myfree(server->server_addr);
+     myfree(server->client_addr);
+     myfree((void *) server);
+@@ -674,6 +696,14 @@ int     xsasl_dovecot_server_first(XSASL_SERVER *xp, const char *sasl_method,
+ 	    vstring_strcpy(reply, "Invalid base64 data in initial response");
+ 	    return XSASL_AUTH_FAIL;
+ 	}
++    if (strcasecmp(sasl_method, "EXTERNAL") == 0
++	&& (!server->tls_client_verified
++	    || *server->tls_client_san_email == 0
++	    || *server->tls_client_fingerprint == 0)) {
++	vstring_strcpy(reply,
++		"EXTERNAL requires a verified client certificate identity");
++	return XSASL_AUTH_FAIL;
++    }
+     for (i = 0; i < 2; i++) {
+ 	if (!server->impl->sasl_stream) {
+ 	    if (xsasl_dovecot_server_connect(server->impl) < 0)
+@@ -690,6 +720,13 @@ int     xsasl_dovecot_server_first(XSASL_SERVER *xp, const char *sasl_method,
+ 	if (server->tls_flag)
+ 	    /* XXX Encapsulate for logging. */
+ 	    vstream_fputs("\tsecured", server->impl->sasl_stream);
++	if (strcasecmp(sasl_method, "EXTERNAL") == 0)
++	    vstream_fprintf(server->impl->sasl_stream,
++			    "\tssl_client_verify=SUCCESS"
++			    "\tssl_client_san_email=%s"
++			    "\tssl_client_fingerprint=%s",
++			    server->tls_client_san_email,
++			    server->tls_client_fingerprint);
+ 	if (init_response) {
+ 
+ 	    /*
+diff --git a/src/xsasl/xsasl_server.c b/src/xsasl/xsasl_server.c
+index c504864..e5dbadd 100644
+--- a/src/xsasl/xsasl_server.c
++++ b/src/xsasl/xsasl_server.c
+@@ -24,6 +24,9 @@
+ /*		const char *user_realm;
+ /*		const char *security_options;
+ /*		int     tls_flag;
++/*		int     tls_client_verified;
++/*		const char *tls_client_san_email;
++/*		const char *tls_client_fingerprint;
+ /*	} XSASL_SERVER_CREATE_ARGS;
+ /* .in -4
+ /*

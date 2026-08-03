@@ -6,6 +6,8 @@ ARG ALPINE_VERSION=3.24
 ARG POSTFIX_VERSION=3.11.5
 ARG POSTFIX_SHA256=4a6ab3d0e9390989fa201fc6c446045fc702c4e16e7a247c3ae261c9e9bee610
 ARG POSTFIX_SOURCE_URL=http://ftp.porcupine.org/mirrors/postfix-release/official/postfix-${POSTFIX_VERSION}.tar.gz
+ARG POSTFIX_EXTERNAL_PATCH_VERSION=3.11.5
+ARG POSTFIX_EXTERNAL_PATCH_SHA256=f6a27933d7b9c99d7debd3c2f779eb65864bbd72cbd01d63a08fff3a5a9a0929
 ARG TLSRPT_VERSION=0.5.0
 ARG TLSRPT_GIT_TAG=v${TLSRPT_VERSION}
 ARG TINYCDB_VERSION=0.81
@@ -25,6 +27,8 @@ FROM --platform=$TARGETPLATFORM alpine:${ALPINE_VERSION} AS builder
 ARG POSTFIX_VERSION
 ARG POSTFIX_SHA256
 ARG POSTFIX_SOURCE_URL
+ARG POSTFIX_EXTERNAL_PATCH_VERSION
+ARG POSTFIX_EXTERNAL_PATCH_SHA256
 ARG TLSRPT_GIT_TAG
 ARG TINYCDB_SHA256
 ARG TINYCDB_SOURCE_URL
@@ -65,12 +69,17 @@ RUN apk upgrade --no-cache \
 
 WORKDIR /tmp/build
 
+COPY patches/postfix-3.11.5-sasl-external-client-cert.patch postfix-sasl-external.patch
+
 RUN curl -fsSLo postfix.tgz "${POSTFIX_SOURCE_URL}" \
+    && test "${POSTFIX_VERSION}" = "${POSTFIX_EXTERNAL_PATCH_VERSION}" \
     && if [ -n "${POSTFIX_SHA256}" ]; then \
          echo "${POSTFIX_SHA256}  postfix.tgz" | sha256sum -c -; \
        fi \
     && tar -xzf postfix.tgz \
-    && mv "postfix-${POSTFIX_VERSION}" postfix
+    && mv "postfix-${POSTFIX_VERSION}" postfix \
+    && echo "${POSTFIX_EXTERNAL_PATCH_SHA256}  postfix-sasl-external.patch" | sha256sum -c - \
+    && patch -d postfix -p1 < postfix-sasl-external.patch
 
 RUN git clone --depth 1 --branch "${TLSRPT_GIT_TAG}" https://github.com/sys4/libtlsrpt.git libtlsrpt \
     && curl -fsSLo tinycdb.tgz "${TINYCDB_SOURCE_URL}" \
@@ -133,6 +142,8 @@ RUN export CCARGS="$(pcre2-config --cflags) -DUSE_TLS -DUSE_SASL_AUTH -DUSE_CYRU
          sample_directory=/etc/postfix \
          readme_directory=no \
     && make -j"$(getconf _NPROCESSORS_ONLN)" \
+    && make -C src/tls tls_external \
+    && LD_LIBRARY_PATH="src/tls:lib" ./src/tls/tls_external \
     && make non-interactive-package \
          install_root=/tmp/out \
          config_directory=/etc/postfix \

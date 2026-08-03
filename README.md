@@ -23,6 +23,7 @@ The image uses a clean multi-stage build, pinned upstream sources, predictable r
 - [Custom Configuration and Maps](#custom-configuration-and-maps)
 - [SMTPUTF8 / EAI](#smtputf8--eai)
 - [TLS and TLSRPT](#tls-and-tlsrpt)
+- [SASL EXTERNAL with client certificates](#sasl-external-with-client-certificates)
 - [Container Logging](#container-logging)
 - [Health Check](#health-check)
 - [Development / Convenience](#development--convenience)
@@ -366,6 +367,92 @@ Typical integration pattern:
 2. Share the socket path with the Postfix container.
 3. Set `POSTFIX_smtp_tlsrpt_enable=yes`.
 4. If needed, override `POSTFIX_RUNTIME_TLSRPT_SOCKET_NAME`.
+
+## SASL EXTERNAL with client certificates
+
+The pinned Postfix 3.11.5 source is patched at build time with
+`patches/postfix-3.11.5-sasl-external-client-cert.patch`. The build verifies
+the patch checksum and refuses to apply this version-specific patch to another
+Postfix release.
+
+The patch bridges a verified TLS client identity to the Dovecot authentication
+protocol used by Postfix. `EXTERNAL` is advertised and accepted for an SMTP
+session only when all of these conditions are true:
+
+- TLS is active and OpenSSL marks the client certificate chain as trusted
+- the leaf certificate has exactly one distinct `rfc822Name` SAN value
+- repeated identical `rfc822Name` values deduplicate to that one identity
+- the SAN is printable ASCII and contains no NUL, tab, CR, LF, or other
+  protocol-control bytes
+- a certificate fingerprint is available
+
+There is no Common Name fallback. A missing SAN, multiple different mail SANs,
+an unsafe SAN, an untrusted chain, or a missing fingerprint removes `EXTERNAL`
+from that session while leaving other configured SASL mechanisms available.
+If the backend offers only `EXTERNAL` and the current session has no eligible
+certificate identity, Postfix continues the SMTP session without announcing
+or accepting `AUTH`; this condition does not terminate the smtpd process.
+The same applies when the certificate-aware mechanism list still contains
+other mechanisms but `smtpd_sasl_mechanism_filter` removes all of them for the
+session, for example an `external`-only static filter after `EXTERNAL` was
+removed because no verified client identity is available.
+
+For an eligible `AUTH EXTERNAL` request, Postfix adds exactly these fields to
+the tab-delimited Dovecot auth request:
+
+```text
+ssl_client_verify=SUCCESS
+ssl_client_san_email=<rfc822Name>
+ssl_client_fingerprint=<hex[:hex...]>
+```
+
+The verify and fingerprint values are generated internally. The certificate
+identity is validated before it reaches this wire format. The receiving auth
+service must still reject duplicate security fields and must perform its normal
+identity lookup and authorization-ID policy.
+
+Client certificates should remain optional when password or OAuth clients are
+also supported:
+
+```text
+smtpd_tls_ask_ccert = yes
+smtpd_tls_req_ccert = no
+```
+
+Configure `smtpd_tls_CAfile` with only the issuing CAs that are trusted for
+client authentication. Do not add personal client certificates to
+`relay_clientcerts`; SASL EXTERNAL must follow the regular authenticated-user
+and account-policy path.
+
+### CRL enforcement
+
+Upstream OpenSSL chain validation does not enable revocation checks merely
+because a certificate contains CRL distribution points. This patch therefore
+adds the opt-in Postfix parameters:
+
+- `smtpd_tls_crl_file` (default: empty)
+- `tlsproxy_tls_crl_file` (default: `$smtpd_tls_crl_file`)
+
+When `smtpd_tls_crl_file` is non-empty, Postfix loads PEM CRLs from that file
+and enables both `X509_V_FLAG_CRL_CHECK` and `X509_V_FLAG_CRL_CHECK_ALL`.
+The file must contain current CRLs for every issuer in the verified chain. A
+revoked certificate and a missing or expired required CRL make the client
+certificate untrusted, so `EXTERNAL` is not offered. Because the client
+certificate remains optional, the TLS connection can still use another SASL
+mechanism.
+
+Failure to load the explicitly configured CRL file disables TLS support rather
+than silently continuing without revocation checks. Leaving the parameter
+empty preserves upstream behavior and does not enable CRL checking. A combined
+CA-and-CRL PEM bundle may be used for both `smtpd_tls_CAfile` and
+`smtpd_tls_crl_file`. Reload Postfix after replacing the CRL bundle so that
+new SMTP server and TLS proxy processes load the updated revocation state.
+
+While CRL checking is enabled, server-side TLS session caching and all session
+tickets are disabled, including TLS 1.3 tickets. Every new SMTP connection
+therefore performs a full certificate verification against the currently
+loaded CRLs; a session verified before a revocation cannot bypass that check
+through TLS resumption after a reload.
 
 ## Container Logging
 
