@@ -1,0 +1,460 @@
+From ef49da8be18b228a45b5a25210905575470d50d3 Mon Sep 17 00:00:00 2001
+From: Christian Roessner <c@roessner.co>
+Date: Thu, 6 Aug 2026 12:39:51 +0200
+Subject: [PATCH 1/3] milter: pass event context to macro lookup
+
+The macro lookup callback receives only a macro name and caller context.
+This is insufficient when a value must be available for one Milter event
+but not another. In particular, end-of-header and end-of-message macro
+values are both resolved by milter_message().
+
+Add an event-aware callback alternative and pass an internal event value at
+each lookup site. Preserve milter_macro_callback() and its behavior for all
+existing callers. This does not change the Milter wire protocol.
+
+Add a regression test for every lookup event, including distinct EOH and
+EOM values, and for switching back to the legacy callback.
+
+Tested with:
+
+    make -C src/milter tests
+    make -j4
+---
+ src/milter/Makefile.in         |  16 ++-
+ src/milter/milter.c            |  62 +++++++++---
+ src/milter/milter.h            |  14 +++
+ src/milter/milter_macro_test.c | 172 +++++++++++++++++++++++++++++++++
+ 4 files changed, 248 insertions(+), 16 deletions(-)
+ create mode 100644 src/milter/milter_macro_test.c
+
+diff --git a/src/milter/Makefile.in b/src/milter/Makefile.in
+index e53f540..cff2c0c 100644
+--- a/src/milter/Makefile.in
++++ b/src/milter/Makefile.in
+@@ -2,12 +2,12 @@ SHELL	= /bin/sh
+ SRCS	= milter.c milter8.c milter_macros.c
+ OBJS	= milter.o milter8.o milter_macros.o
+ HDRS	= milter.h
+-TESTSRC	= 
++TESTSRC	= milter_macro_test.c
+ DEFS	= -I. -I$(INC_DIR) -D$(SYSTYPE)
+ CFLAGS	= $(DEBUG) $(OPT) $(DEFS)
+ INCL	=
+ LIB	= libmilter.a
+-TESTPROG= milter test-milter
++TESTPROG= milter test-milter milter_macro_test
+ 
+ LIBS	= ../../$(LIB_PREFIX)global$(LIB_SUFFIX) \
+ 	../../$(LIB_PREFIX)util$(LIB_SUFFIX)
+@@ -26,7 +26,7 @@ Makefile: Makefile.in
+ 
+ test:	$(TESTPROG)
+ 
+-tests:
++tests: test_milter_macro
+ 
+ root_tests:
+ 
+@@ -58,6 +58,16 @@ milter:	milter.c $(LIB) $(LIBS)
+ test-milter: test-milter.c
+ 	cc -g -I/usr/local/include -o $@ $? -L/usr/local/lib -lmilter -lpthread
+ 
++milter_macro_test: milter_macro_test.o $(LIB) \
++	../../lib/lib$(LIB_PREFIX)global$(LIB_SUFFIX) \
++	../../lib/lib$(LIB_PREFIX)util$(LIB_SUFFIX)
++	$(CC) $(CFLAGS) $(SHLIB_RPATH) -o $@ milter_macro_test.o \
++		$(LIB) ../../lib/lib$(LIB_PREFIX)global$(LIB_SUFFIX) \
++		../../lib/lib$(LIB_PREFIX)util$(LIB_SUFFIX) $(SYSLIBS)
++
++test_milter_macro: milter_macro_test
++	$(SHLIB_ENV) $(VALGRIND) ./milter_macro_test
++
+ depend: $(MAKES)
+ 	(sed '1,/^# do not edit/!d' Makefile.in; \
+ 	set -e; for i in [a-z][a-z0-9]*.c; do \
+diff --git a/src/milter/milter.c b/src/milter/milter.c
+index dfd5e1c..a1634d5 100644
+--- a/src/milter/milter.c
++++ b/src/milter/milter.c
+@@ -36,6 +36,10 @@
+ /*	const char *(*mac_lookup)(const char *name, void *context);
+ /*	void	*mac_context;
+ /*
++/*	void	milter_macro_callback_event(milters, mac_lookup, mac_context)
++/*	const char *(*mac_lookup)(const char *name, int event, void *context);
++/*	void	*mac_context;
++/*
+ /*	void	milter_edit_callback(milters, add_header, upd_header,
+ /*					ins_header, del_header, chg_from,
+ /*					add_rcpt, add_rcpt_par, del_rcpt,
+@@ -142,6 +146,10 @@
+ /*	context for macro lookup. This function must be called
+ /*	before milter_conn_event().
+ /*
++/*	milter_macro_callback_event() is an event-aware alternative to
++/*	milter_macro_callback(). The event argument identifies the Milter
++/*	protocol event for which a macro value is requested.
++/*
+ /*	milter_edit_callback() specifies call-back functions and
+ /*	context for editing the queue file after the end-of-data
+ /*	is received. This function must be called before milter_message();
+@@ -324,7 +332,8 @@ HTABLE *milter_macro_defaults_create(const char *macro_defaults)
+ 
+ /* milter_macro_lookup - look up macros */
+ 
+-static ARGV *milter_macro_lookup(MILTERS *milters, const char *macro_names)
++static ARGV *milter_macro_lookup(MILTERS *milters, const char *macro_names,
++					         int event)
+ {
+     const char *myname = "milter_macro_lookup";
+     char   *saved_names = mystrdup(macro_names);
+@@ -342,7 +351,12 @@ static ARGV *milter_macro_lookup(MILTERS *milters, const char *macro_names)
+ 	    cname = STR(vstring_sprintf(canon_buf, "{%s}", name));
+ 	else
+ 	    cname = name;
+-	if ((value = milters->mac_lookup(cname, milters->mac_context)) != 0) {
++	if (milters->mac_lookup_event != 0)
++	    value = milters->mac_lookup_event(cname, event,
++					       milters->mac_context);
++	else
++	    value = milters->mac_lookup(cname, milters->mac_context);
++	if (value != 0) {
+ 	    if (msg_verbose)
+ 		msg_info("%s: result \"%s\"", myname, value);
+ 	    argv_add(argv, name, value, (char *) 0);
+@@ -365,6 +379,18 @@ void    milter_macro_callback(MILTERS *milters,
+ 			              void *mac_context)
+ {
+     milters->mac_lookup = mac_lookup;
++    milters->mac_lookup_event = 0;
++    milters->mac_context = mac_context;
++}
++
++/* milter_macro_callback_event - specify event-aware macro lookup */
++
++void    milter_macro_callback_event(MILTERS *milters,
++		           MILTER_MAC_LOOKUP_EVENT_FN mac_lookup,
++				      void *mac_context)
++{
++    milters->mac_lookup = 0;
++    milters->mac_lookup_event = mac_lookup;
+     milters->mac_context = mac_context;
+ }
+ 
+@@ -407,19 +433,21 @@ const char *milter_conn_event(MILTERS *milters,
+     ARGV   *global_macros = 0;
+     ARGV   *any_macros;
+ 
+-#define MILTER_MACRO_EVAL(global_macros, m, milters, member) \
++#define MILTER_MACRO_EVAL(global_macros, m, milters, member, event) \
+ 	((m->macros && m->macros->member[0]) ? \
+-	    milter_macro_lookup(milters, m->macros->member) : \
++	    milter_macro_lookup(milters, m->macros->member, event) : \
+ 		global_macros ? global_macros : \
+ 		    (global_macros = \
+-		         milter_macro_lookup(milters, milters->macros->member)))
++		         milter_macro_lookup(milters, milters->macros->member, \
++					     event)))
+ 
+     if (msg_verbose)
+ 	msg_info("report connect to all milters");
+     for (resp = 0, m = milters->milter_list; resp == 0 && m != 0; m = m->next) {
+ 	if (m->connect_on_demand != 0)
+ 	    m->connect_on_demand(m);
+-	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, conn_macros);
++	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, conn_macros,
++				       MILTER_MACRO_EVENT_CONNECT);
+ 	resp = m->conn_event(m, client_name, client_addr, client_port,
+ 			     addr_family, any_macros);
+ 	if (any_macros != global_macros)
+@@ -443,7 +471,8 @@ const char *milter_helo_event(MILTERS *milters, const char *helo_name,
+     if (msg_verbose)
+ 	msg_info("report helo to all milters");
+     for (resp = 0, m = milters->milter_list; resp == 0 && m != 0; m = m->next) {
+-	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, helo_macros);
++	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, helo_macros,
++				       MILTER_MACRO_EVENT_HELO);
+ 	resp = m->helo_event(m, helo_name, esmtp_flag, any_macros);
+ 	if (any_macros != global_macros)
+ 	    argv_free(any_macros);
+@@ -465,7 +494,8 @@ const char *milter_mail_event(MILTERS *milters, const char **argv)
+     if (msg_verbose)
+ 	msg_info("report sender to all milters");
+     for (resp = 0, m = milters->milter_list; resp == 0 && m != 0; m = m->next) {
+-	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, mail_macros);
++	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, mail_macros,
++				       MILTER_MACRO_EVENT_MAIL);
+ 	resp = m->mail_event(m, argv, any_macros);
+ 	if (any_macros != global_macros)
+ 	    argv_free(any_macros);
+@@ -490,7 +520,8 @@ const char *milter_rcpt_event(MILTERS *milters, int flags, const char **argv)
+ 	if ((flags & MILTER_FLAG_WANT_RCPT_REJ) == 0
+ 	    || (m->flags & MILTER_FLAG_WANT_RCPT_REJ) != 0) {
+ 	    any_macros =
+-		MILTER_MACRO_EVAL(global_macros, m, milters, rcpt_macros);
++		MILTER_MACRO_EVAL(global_macros, m, milters, rcpt_macros,
++				  MILTER_MACRO_EVENT_RCPT);
+ 	    resp = m->rcpt_event(m, argv, any_macros);
+ 	    if (any_macros != global_macros)
+ 		argv_free(any_macros);
+@@ -513,7 +544,8 @@ const char *milter_data_event(MILTERS *milters)
+     if (msg_verbose)
+ 	msg_info("report data to all milters");
+     for (resp = 0, m = milters->milter_list; resp == 0 && m != 0; m = m->next) {
+-	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, data_macros);
++	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, data_macros,
++				       MILTER_MACRO_EVENT_DATA);
+ 	resp = m->data_event(m, any_macros);
+ 	if (any_macros != global_macros)
+ 	    argv_free(any_macros);
+@@ -535,7 +567,8 @@ const char *milter_unknown_event(MILTERS *milters, const char *command)
+     if (msg_verbose)
+ 	msg_info("report unknown command to all milters");
+     for (resp = 0, m = milters->milter_list; resp == 0 && m != 0; m = m->next) {
+-	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, unk_macros);
++	any_macros = MILTER_MACRO_EVAL(global_macros, m, milters, unk_macros,
++				       MILTER_MACRO_EVENT_UNKNOWN);
+ 	resp = m->unknown_event(m, command, any_macros);
+ 	if (any_macros != global_macros)
+ 	    argv_free(any_macros);
+@@ -574,8 +607,10 @@ const char *milter_message(MILTERS *milters, VSTREAM *fp, off_t data_offset,
+     if (msg_verbose)
+ 	msg_info("inspect content by all milters");
+     for (resp = 0, m = milters->milter_list; resp == 0 && m != 0; m = m->next) {
+-	any_eoh_macros = MILTER_MACRO_EVAL(global_eoh_macros, m, milters, eoh_macros);
+-	any_eod_macros = MILTER_MACRO_EVAL(global_eod_macros, m, milters, eod_macros);
++	any_eoh_macros = MILTER_MACRO_EVAL(global_eoh_macros, m, milters,
++				           eoh_macros, MILTER_MACRO_EVENT_EOH);
++	any_eod_macros = MILTER_MACRO_EVAL(global_eod_macros, m, milters,
++				           eod_macros, MILTER_MACRO_EVENT_EOM);
+ 	resp = m->message(m, fp, data_offset, any_eoh_macros, any_eod_macros,
+ 			  auto_hdrs);
+ 	if (any_eoh_macros != global_eoh_macros)
+@@ -718,6 +753,7 @@ MILTERS *milter_new(const char *names,
+     }
+     milters->milter_list = head;
+     milters->mac_lookup = 0;
++    milters->mac_lookup_event = 0;
+     milters->mac_context = 0;
+     milters->macros = macros;
+     milters->macro_defaults = macro_defaults;
+diff --git a/src/milter/milter.h b/src/milter/milter.h
+index 3a1e3f9..0b0f661 100644
+--- a/src/milter/milter.h
++++ b/src/milter/milter.h
+@@ -94,6 +94,17 @@ extern struct HTABLE *milter_macro_defaults_create(const char *);
+   * A bunch of Milters.
+   */
+ typedef const char *(*MILTER_MAC_LOOKUP_FN) (const char *, void *);
++typedef const char *(*MILTER_MAC_LOOKUP_EVENT_FN) (const char *, int, void *);
++
++/* Macro lookup event context. */
++#define MILTER_MACRO_EVENT_CONNECT	0
++#define MILTER_MACRO_EVENT_HELO		1
++#define MILTER_MACRO_EVENT_MAIL		2
++#define MILTER_MACRO_EVENT_RCPT		3
++#define MILTER_MACRO_EVENT_DATA		4
++#define MILTER_MACRO_EVENT_EOM		5
++#define MILTER_MACRO_EVENT_EOH		6
++#define MILTER_MACRO_EVENT_UNKNOWN	7
+ typedef const char *(*MILTER_ADD_HEADER_FN) (void *, const char *, const char *, const char *);
+ typedef const char *(*MILTER_EDIT_HEADER_FN) (void *, ssize_t, const char *, const char *, const char *);
+ typedef const char *(*MILTER_DEL_HEADER_FN) (void *, ssize_t, const char *);
+@@ -105,6 +116,7 @@ typedef const char *(*MILTER_EDIT_BODY_FN) (void *, int, int, VSTRING *);
+ typedef struct MILTERS {
+     MILTER *milter_list;		/* linked list of Milters */
+     MILTER_MAC_LOOKUP_FN mac_lookup;
++    MILTER_MAC_LOOKUP_EVENT_FN mac_lookup_event;
+     void   *mac_context;		/* macro lookup context */
+     struct MILTER_MACROS *macros;
+     struct HTABLE *macro_defaults;
+@@ -134,6 +146,8 @@ extern MILTERS *milter_new(const char *, int, int, int, const char *,
+ 			           const char *, MILTER_MACROS *,
+ 			           struct HTABLE *);
+ extern void milter_macro_callback(MILTERS *, MILTER_MAC_LOOKUP_FN, void *);
++extern void milter_macro_callback_event(MILTERS *, MILTER_MAC_LOOKUP_EVENT_FN,
++					        void *);
+ extern void milter_edit_callback(MILTERS *milters, MILTER_ADD_HEADER_FN,
+ 		               MILTER_EDIT_HEADER_FN, MILTER_EDIT_HEADER_FN,
+ 			          MILTER_DEL_HEADER_FN, MILTER_EDIT_FROM_FN,
+diff --git a/src/milter/milter_macro_test.c b/src/milter/milter_macro_test.c
+new file mode 100644
+index 0000000..569d163
+--- /dev/null
++++ b/src/milter/milter_macro_test.c
+@@ -0,0 +1,172 @@
++/*++
++/* NAME
++/*	milter_macro_test 1t
++/* SUMMARY
++/*	Milter macro callback unit test
++/* SYNOPSIS
++/*	./milter_macro_test
++/* DESCRIPTION
++/*	milter_macro_test verifies event-aware macro lookup and compatibility
++/*	with the legacy macro lookup callback.
++/* LICENSE
++/* .ad
++/* .fi
++/*	The Secure Mailer license must be distributed with this software.
++/*--*/
++
++ /*
++  * System library.
++  */
++#include <sys_defs.h>
++#include <string.h>
++
++ /*
++  * Utility library.
++  */
++#include <argv.h>
++#include <msg.h>
++#include <msg_vstream.h>
++#include <vstream.h>
++
++ /*
++  * Application-specific.
++  */
++#include "milter.h"
++
++static int event_log[16];
++static int event_count;
++static int legacy_count;
++
++static void fail(const char *text)
++{
++    msg_fatal("%s", text);
++}
++
++static void check_macros(ARGV *macros)
++{
++    if (macros == 0 || macros->argc != 2
++	|| strcmp(macros->argv[0], "test") != 0
++	|| strcmp(macros->argv[1], "value") != 0)
++	fail("unexpected macro lookup result");
++}
++
++static const char *event_lookup(const char *name, int event, void *unused)
++{
++    if (strcmp(name, "{test}") != 0)
++	fail("unexpected macro lookup name");
++    event_log[event_count++] = event;
++    return ("value");
++}
++
++static const char *legacy_lookup(const char *name, void *unused)
++{
++    if (strcmp(name, "{test}") != 0)
++	fail("unexpected legacy macro lookup name");
++    legacy_count++;
++    return ("value");
++}
++
++static const char *conn_event(MILTER *unused, const char *name,
++		              const char *addr, const char *port,
++		              unsigned family, ARGV *macros)
++{
++    check_macros(macros);
++    return (0);
++}
++
++static const char *helo_event(MILTER *unused, const char *name,
++		              int esmtp, ARGV *macros)
++{
++    check_macros(macros);
++    return (0);
++}
++
++static const char *mail_event(MILTER *unused, const char **argv, ARGV *macros)
++{
++    check_macros(macros);
++    return (0);
++}
++
++static const char *rcpt_event(MILTER *unused, const char **argv, ARGV *macros)
++{
++    check_macros(macros);
++    return (0);
++}
++
++static const char *data_event(MILTER *unused, ARGV *macros)
++{
++    check_macros(macros);
++    return (0);
++}
++
++static const char *unknown_event(MILTER *unused, const char *command,
++		                 ARGV *macros)
++{
++    check_macros(macros);
++    return (0);
++}
++
++static const char *message_event(MILTER *unused, VSTREAM *fp,
++		                 off_t offset, ARGV *eoh_macros,
++		                 ARGV *eom_macros, ARGV *auto_hdrs)
++{
++    check_macros(eoh_macros);
++    check_macros(eom_macros);
++    return (0);
++}
++
++static void check_event(int offset, int expected)
++{
++    if (event_count <= offset || event_log[offset] != expected)
++	fail("unexpected macro lookup event");
++}
++
++int main(int argc, char **argv)
++{
++    MILTER_MACROS macros;
++    MILTERS milters;
++    MILTER milter;
++    const char *args[] = { "address", 0 };
++
++    msg_vstream_init(argv[0], VSTREAM_ERR);
++    memset(&macros, 0, sizeof(macros));
++    macros.conn_macros = macros.helo_macros = macros.mail_macros = "test";
++    macros.rcpt_macros = macros.data_macros = macros.eoh_macros = "test";
++    macros.eod_macros = macros.unk_macros = "test";
++    memset(&milters, 0, sizeof(milters));
++    memset(&milter, 0, sizeof(milter));
++    milters.milter_list = &milter;
++    milters.macros = &macros;
++    milter.conn_event = conn_event;
++    milter.helo_event = helo_event;
++    milter.mail_event = mail_event;
++    milter.rcpt_event = rcpt_event;
++    milter.data_event = data_event;
++    milter.unknown_event = unknown_event;
++    milter.message = message_event;
++
++    milter_macro_callback_event(&milters, event_lookup, 0);
++    (void) milter_conn_event(&milters, "name", "addr", "port", 0);
++    (void) milter_helo_event(&milters, "name", 0);
++    (void) milter_mail_event(&milters, args);
++    (void) milter_rcpt_event(&milters, 0, args);
++    (void) milter_data_event(&milters);
++    (void) milter_unknown_event(&milters, "command");
++    (void) milter_message(&milters, 0, 0, 0);
++    if (event_count != 8)
++	fail("unexpected macro lookup event count");
++    check_event(0, MILTER_MACRO_EVENT_CONNECT);
++    check_event(1, MILTER_MACRO_EVENT_HELO);
++    check_event(2, MILTER_MACRO_EVENT_MAIL);
++    check_event(3, MILTER_MACRO_EVENT_RCPT);
++    check_event(4, MILTER_MACRO_EVENT_DATA);
++    check_event(5, MILTER_MACRO_EVENT_UNKNOWN);
++    check_event(6, MILTER_MACRO_EVENT_EOH);
++    check_event(7, MILTER_MACRO_EVENT_EOM);
++
++    milter_macro_callback(&milters, legacy_lookup, 0);
++    (void) milter_data_event(&milters);
++    if (legacy_count != 1)
++	fail("legacy macro lookup callback not used");
++    return (0);
++}
+-- 
+2.55.0
+

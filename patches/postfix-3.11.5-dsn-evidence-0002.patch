@@ -1,0 +1,527 @@
+From 5eaf421b8e21202a83c0f7f146c3be334f438be0 Mon Sep 17 00:00:00 2001
+From: Christian Roessner <c@roessner.co>
+Date: Thu, 6 Aug 2026 12:39:54 +0200
+Subject: [PATCH 2/3] cleanup: accept DSN evidence only on private service
+
+A Milter cannot trust DSN origin data that arrived as message content or
+through the public cleanup service. Such input can be supplied by an SMTP
+client or by another untrusted submission path.
+
+Add a private dsn_cleanup master service and a post_mail interface that
+passes the original queue ID and encoded original envelope as transient
+attributes. The cleanup server recognizes those reserved attributes only
+when invoked as dsn_cleanup. It rejects them on other services, rejects
+duplicates and malformed or incomplete input, and does not write them to
+the new queue file.
+
+The existing public cleanup service and post_mail interfaces are unchanged.
+Systems that do not use dsn_cleanup see no behavioral or protocol change.
+
+Add positive and negative cleanup tests for trusted input, public-service
+input, duplicates, incomplete input, and non-base64url input.
+
+Tested with:
+
+    make -C src/cleanup test_cleanup_envelope
+    make -j4
+---
+ conf/master.cf                      |   1 +
+ src/cleanup/Makefile.in             |   3 +
+ src/cleanup/cleanup.c               |   4 +-
+ src/cleanup/cleanup.h               |   3 +
+ src/cleanup/cleanup_envelope.c      |  54 +++++++++++
+ src/cleanup/cleanup_envelope_test.c | 135 ++++++++++++++++++++++++++++
+ src/cleanup/cleanup_state.c         |   7 ++
+ src/global/mail_proto.h             |   3 +
+ src/global/post_mail.c              |  52 ++++++++++-
+ src/global/post_mail.h              |   2 +
+ 10 files changed, 259 insertions(+), 5 deletions(-)
+
+diff --git a/conf/master.cf b/conf/master.cf
+index 5abe06c..38d5ab9 100644
+--- a/conf/master.cf
++++ b/conf/master.cf
+@@ -58,6 +58,7 @@ smtp      inet  n       -       n       -       -       smtpd
+ #628       inet  n       -       n       -       -       qmqpd
+ pickup    unix  n       -       n       60      1       pickup
+ cleanup   unix  n       -       n       -       0       cleanup
++dsn_cleanup unix y      -       n       -       0       cleanup
+ qmgr      unix  n       -       n       300     1       qmgr
+ #qmgr     unix  n       -       n       300     1       oqmgr
+ tlsmgr    unix  -       -       n       1000?   1       tlsmgr
+diff --git a/src/cleanup/Makefile.in b/src/cleanup/Makefile.in
+index 5430e2f..c89a910 100644
+--- a/src/cleanup/Makefile.in
++++ b/src/cleanup/Makefile.in
+@@ -942,6 +942,7 @@ cleanup_envelope.o: ../../include/iostuff.h
+ cleanup_envelope.o: ../../include/mail_conf.h
+ cleanup_envelope.o: ../../include/mail_params.h
+ cleanup_envelope.o: ../../include/mail_proto.h
++cleanup_envelope.o: ../../include/mail_queue.h
+ cleanup_envelope.o: ../../include/mail_stream.h
+ cleanup_envelope.o: ../../include/maps.h
+ cleanup_envelope.o: ../../include/match_list.h
+@@ -980,8 +981,10 @@ cleanup_envelope_test.o: ../../include/dsn_mask.h
+ cleanup_envelope_test.o: ../../include/header_body_checks.h
+ cleanup_envelope_test.o: ../../include/header_opts.h
+ cleanup_envelope_test.o: ../../include/htable.h
++cleanup_envelope_test.o: ../../include/iostuff.h
+ cleanup_envelope_test.o: ../../include/mail_conf.h
+ cleanup_envelope_test.o: ../../include/mail_params.h
++cleanup_envelope_test.o: ../../include/mail_proto.h
+ cleanup_envelope_test.o: ../../include/mail_stream.h
+ cleanup_envelope_test.o: ../../include/maps.h
+ cleanup_envelope_test.o: ../../include/match_list.h
+diff --git a/src/cleanup/cleanup.c b/src/cleanup/cleanup.c
+index 7f0ce19..45ae910 100644
+--- a/src/cleanup/cleanup.c
++++ b/src/cleanup/cleanup.c
+@@ -544,7 +544,7 @@
+ 
+ /* cleanup_service - process one request to inject a message into the queue */
+ 
+-static void cleanup_service(VSTREAM *src, char *unused_service, char **argv)
++static void cleanup_service(VSTREAM *src, char *service, char **argv)
+ {
+     VSTRING *buf = vstring_alloc(100);
+     CLEANUP_STATE *state;
+@@ -562,6 +562,8 @@ static void cleanup_service(VSTREAM *src, char *unused_service, char **argv)
+      * Open a queue file and initialize state.
+      */
+     state = cleanup_open(src);
++    if (strcmp(service, MAIL_SERVICE_DSN_CLEANUP) == 0)
++	state->dsn_evidence_allowed = 1;
+ 
+     /*
+      * Send the queue id to the client. Read client processing options. If we
+diff --git a/src/cleanup/cleanup.h b/src/cleanup/cleanup.h
+index 680d87d..5a20b97 100644
+--- a/src/cleanup/cleanup.h
++++ b/src/cleanup/cleanup.h
+@@ -102,6 +102,9 @@ typedef struct CLEANUP_STATE {
+     int     dsn_notify;			/* DSN never/delay/fail/success */
+     char   *dsn_orcpt;			/* DSN original recipient */
+     char   *verp_delims;		/* VERP delimiters (optional) */
++    int     dsn_evidence_allowed;	/* trusted private service */
++    char   *dsn_original_queue_id;	/* transient DSN evidence */
++    char   *dsn_original_envelope;	/* transient DSN evidence */
+ #ifdef DELAY_ACTION
+     int     defer_delay;		/* deferred delivery */
+ #endif
+diff --git a/src/cleanup/cleanup_envelope.c b/src/cleanup/cleanup_envelope.c
+index 1091db0..e0e41a3 100644
+--- a/src/cleanup/cleanup_envelope.c
++++ b/src/cleanup/cleanup_envelope.c
+@@ -77,6 +77,7 @@
+ #include <rec_attr_map.h>
+ #include <smtputf8.h>
+ #include <deliver_request.h>
++#include <mail_queue.h>
+ 
+ /* Application-specific. */
+ 
+@@ -87,6 +88,22 @@
+ 
+ static void cleanup_envelope_process(CLEANUP_STATE *, int, const char *, ssize_t);
+ 
++#define CLEANUP_DSN_ENVELOPE_MAX	((47 * 1024 * 4 + 2) / 3)
++
++/* cleanup_dsn_envelope_ok - validate unpadded base64url transport value */
++
++static int cleanup_dsn_envelope_ok(const char *value)
++{
++    const unsigned char *cp;
++
++    if (*value == 0 || strlen(value) > CLEANUP_DSN_ENVELOPE_MAX)
++	return (0);
++    for (cp = (const unsigned char *) value; *cp; cp++)
++	if (!ISALNUM(*cp) && *cp != '-' && *cp != '_')
++	    return (0);
++    return (1);
++}
++
+ /* cleanup_envelope - initialize message envelope */
+ 
+ void    cleanup_envelope(CLEANUP_STATE *state, int type,
+@@ -188,6 +205,35 @@ static void cleanup_envelope_process(CLEANUP_STATE *state, int type,
+ 	    state->errs |= CLEANUP_STAT_BAD;
+ 	    return;
+ 	}
++	if (strcmp(attr_name, MAIL_ATTR_DSN_ORIG_QUEUEID) == 0
++	    || strcmp(attr_name, MAIL_ATTR_DSN_ORIG_ENVELOPE) == 0) {
++	    if (state->dsn_evidence_allowed == 0) {
++		msg_warn("%s: message rejected: DSN evidence on untrusted service",
++			 state->queue_id);
++		state->errs |= CLEANUP_STAT_BAD;
++		return;
++	    }
++	    if (strcmp(attr_name, MAIL_ATTR_DSN_ORIG_QUEUEID) == 0) {
++		if (state->dsn_original_queue_id != 0
++		    || mail_queue_id_ok(attr_value) == 0) {
++		    msg_warn("%s: message rejected: invalid DSN original queue ID",
++			     state->queue_id);
++		    state->errs |= CLEANUP_STAT_BAD;
++		    return;
++		}
++		state->dsn_original_queue_id = mystrdup(attr_value);
++	    } else {
++		if (state->dsn_original_envelope != 0
++		    || cleanup_dsn_envelope_ok(attr_value) == 0) {
++		    msg_warn("%s: message rejected: invalid DSN original envelope",
++			     state->queue_id);
++		    state->errs |= CLEANUP_STAT_BAD;
++		    return;
++		}
++		state->dsn_original_envelope = mystrdup(attr_value);
++	    }
++	    return;
++	}
+ 	/* Zero-length values are place holders for unavailable values. */
+ 	if (*attr_value == 0) {
+ 	    msg_warn("%s: spurious null attribute value for \"%s\" -- ignored",
+@@ -335,6 +381,14 @@ static void cleanup_envelope_process(CLEANUP_STATE *state, int type,
+ 	return;
+     }
+     if (type == REC_TYPE_MESG) {
++	if (state->dsn_evidence_allowed
++	    && (state->dsn_original_queue_id == 0
++		|| state->dsn_original_envelope == 0)) {
++	    msg_warn("%s: message rejected: incomplete DSN origin evidence",
++		     state->queue_id);
++	    state->errs |= CLEANUP_STAT_BAD;
++	    return;
++	}
+ 	state->action = cleanup_message;
+ 	if (state->flags & CLEANUP_FLAG_INRCPT) {
+ 	    if (state->milters || cleanup_milters) {
+diff --git a/src/cleanup/cleanup_envelope_test.c b/src/cleanup/cleanup_envelope_test.c
+index eda68e1..78780bc 100644
+--- a/src/cleanup/cleanup_envelope_test.c
++++ b/src/cleanup/cleanup_envelope_test.c
+@@ -12,6 +12,7 @@
+   */
+ #include <msg.h>
+ #include <msg_vstream.h>
++#include <mymalloc.h>
+ #include <vstring.h>
+ #include <vstream.h>
+ #include <stringops.h>
+@@ -23,6 +24,7 @@
+ #include <rec_type.h>
+ #include <cleanup_user.h>
+ #include <mail_params.h>
++#include <mail_proto.h>
+ #include <smtputf8.h>
+ 
+  /*
+@@ -195,10 +197,143 @@ static int overrides_size_fields(const TEST_CASE *tp)
+     return (PASS);
+ }
+ 
++/* open_test_state - allocate state with a writable queue stream */
++
++static CLEANUP_STATE *open_test_state(void)
++{
++    CLEANUP_STATE *state = cleanup_state_alloc((VSTREAM *) 0);
++
++    state->queue_id = mystrdup("TEST");
++    if ((state->dst = vstream_fopen("/dev/null", O_WRONLY, 0)) == 0)
++	msg_fatal("vstream_fopen(\"/dev/null\", O_WRONLY, 0): %m");
++    return (state);
++}
++
++/* close_test_state - close queue stream and release state */
++
++static void close_test_state(CLEANUP_STATE *state)
++{
++    (void) vstream_fclose(state->dst);
++    state->dst = 0;
++    cleanup_state_free(state);
++}
++
++/* accepts_trusted_dsn_evidence - accept and absorb trusted attributes */
++
++static int accepts_trusted_dsn_evidence(const TEST_CASE *tp)
++{
++    CLEANUP_STATE *state = open_test_state();
++    int     result = PASS;
++
++    state->dsn_evidence_allowed = 1;
++    cleanup_envelope(state, REC_TYPE_ATTR,
++		     MAIL_ATTR_DSN_ORIG_QUEUEID "=ABC123",
++		     sizeof(MAIL_ATTR_DSN_ORIG_QUEUEID "=ABC123") - 1);
++    CLEANUP_RECORD(state, REC_TYPE_ATTR,
++		   MAIL_ATTR_DSN_ORIG_ENVELOPE "=AQABYQABAAFy",
++		   sizeof(MAIL_ATTR_DSN_ORIG_ENVELOPE "=AQABYQABAAFy") - 1);
++    if (state->errs != CLEANUP_STAT_OK
++	|| state->dsn_original_queue_id == 0
++	|| strcmp(state->dsn_original_queue_id, "ABC123") != 0
++	|| state->dsn_original_envelope == 0
++	|| strcmp(state->dsn_original_envelope, "AQABYQABAAFy") != 0
++	|| nvtable_find(state->attr, MAIL_ATTR_DSN_ORIG_QUEUEID) != 0
++	|| nvtable_find(state->attr, MAIL_ATTR_DSN_ORIG_ENVELOPE) != 0) {
++	msg_warn("trusted DSN evidence was not accepted and absorbed");
++	result = FAIL;
++    }
++    close_test_state(state);
++    return (result);
++}
++
++/* rejects_untrusted_dsn_evidence - reject evidence on public cleanup */
++
++static int rejects_untrusted_dsn_evidence(const TEST_CASE *tp)
++{
++    CLEANUP_STATE *state = open_test_state();
++    int     result;
++
++    cleanup_envelope(state, REC_TYPE_ATTR,
++		     MAIL_ATTR_DSN_ORIG_QUEUEID "=ABC123",
++		     sizeof(MAIL_ATTR_DSN_ORIG_QUEUEID "=ABC123") - 1);
++    result = (state->errs & CLEANUP_STAT_BAD) != 0 ? PASS : FAIL;
++    close_test_state(state);
++    return (result);
++}
++
++/* rejects_duplicate_dsn_evidence - reject duplicate trusted attributes */
++
++static int rejects_duplicate_dsn_evidence(const TEST_CASE *tp)
++{
++    CLEANUP_STATE *state = open_test_state();
++    int     result;
++
++    state->dsn_evidence_allowed = 1;
++    cleanup_envelope(state, REC_TYPE_ATTR,
++		     MAIL_ATTR_DSN_ORIG_QUEUEID "=ABC123",
++		     sizeof(MAIL_ATTR_DSN_ORIG_QUEUEID "=ABC123") - 1);
++    CLEANUP_RECORD(state, REC_TYPE_ATTR,
++		   MAIL_ATTR_DSN_ORIG_QUEUEID "=DEF456",
++		   sizeof(MAIL_ATTR_DSN_ORIG_QUEUEID "=DEF456") - 1);
++    result = (state->errs & CLEANUP_STAT_BAD) != 0 ? PASS : FAIL;
++    close_test_state(state);
++    return (result);
++}
++
++/* rejects_incomplete_dsn_evidence - require the complete attribute pair */
++
++static int rejects_incomplete_dsn_evidence(const TEST_CASE *tp)
++{
++    CLEANUP_STATE *state = open_test_state();
++    int     result;
++
++    state->dsn_evidence_allowed = 1;
++    cleanup_envelope(state, REC_TYPE_ATTR,
++		     MAIL_ATTR_DSN_ORIG_QUEUEID "=ABC123",
++		     sizeof(MAIL_ATTR_DSN_ORIG_QUEUEID "=ABC123") - 1);
++    state->sender = mystrdup("");
++    state->arrival_time.tv_sec = 1;
++    CLEANUP_RECORD(state, REC_TYPE_MESG, "", 0);
++    result = (state->errs & CLEANUP_STAT_BAD) != 0 ? PASS : FAIL;
++    close_test_state(state);
++    return (result);
++}
++
++/* rejects_malformed_dsn_evidence - require unpadded base64url */
++
++static int rejects_malformed_dsn_evidence(const TEST_CASE *tp)
++{
++    CLEANUP_STATE *state = open_test_state();
++    int     result;
++
++    state->dsn_evidence_allowed = 1;
++    cleanup_envelope(state, REC_TYPE_ATTR,
++		     MAIL_ATTR_DSN_ORIG_ENVELOPE "=AQABYQ==",
++		     sizeof(MAIL_ATTR_DSN_ORIG_ENVELOPE "=AQABYQ==") - 1);
++    result = (state->errs & CLEANUP_STAT_BAD) != 0 ? PASS : FAIL;
++    close_test_state(state);
++    return (result);
++}
++
+ static const TEST_CASE test_cases[] = {
+     {"overrides_size_fields",
+ 	overrides_size_fields,
+     },
++    {"accepts_trusted_dsn_evidence",
++	accepts_trusted_dsn_evidence,
++    },
++    {"rejects_untrusted_dsn_evidence",
++	rejects_untrusted_dsn_evidence,
++    },
++    {"rejects_duplicate_dsn_evidence",
++	rejects_duplicate_dsn_evidence,
++    },
++    {"rejects_incomplete_dsn_evidence",
++	rejects_incomplete_dsn_evidence,
++    },
++    {"rejects_malformed_dsn_evidence",
++	rejects_malformed_dsn_evidence,
++    },
+     {0},
+ };
+ 
+diff --git a/src/cleanup/cleanup_state.c b/src/cleanup/cleanup_state.c
+index d6eca2f..3a4eaff 100644
+--- a/src/cleanup/cleanup_state.c
++++ b/src/cleanup/cleanup_state.c
+@@ -127,6 +127,9 @@ CLEANUP_STATE *cleanup_state_alloc(VSTREAM *src)
+     state->dsn_notify = 0;
+     state->dsn_orcpt = 0;
+     state->verp_delims = 0;
++    state->dsn_evidence_allowed = 0;
++    state->dsn_original_queue_id = 0;
++    state->dsn_original_envelope = 0;
+     state->milters = 0;
+     state->client_name = 0;
+     state->reverse_name = 0;
+@@ -194,6 +197,10 @@ void    cleanup_state_free(CLEANUP_STATE *state)
+ 	myfree(state->dsn_orcpt);
+     if (state->verp_delims)
+ 	myfree(state->verp_delims);
++    if (state->dsn_original_queue_id)
++	myfree(state->dsn_original_queue_id);
++    if (state->dsn_original_envelope)
++	myfree(state->dsn_original_envelope);
+     if (state->milters)
+ 	milter_free(state->milters);
+     if (state->milter_ext_from)
+diff --git a/src/global/mail_proto.h b/src/global/mail_proto.h
+index 4c3f339..884a220 100644
+--- a/src/global/mail_proto.h
++++ b/src/global/mail_proto.h
+@@ -37,6 +37,7 @@
+   */
+ #define MAIL_SERVICE_BOUNCE	"bounce"
+ #define MAIL_SERVICE_CLEANUP	"cleanup"
++#define MAIL_SERVICE_DSN_CLEANUP "dsn_cleanup"
+ #define MAIL_SERVICE_DEFER	"defer"
+ #define MAIL_SERVICE_FORWARD	"forward"
+ #define MAIL_SERVICE_LOCAL	"local"
+@@ -157,6 +158,8 @@ extern char *mail_pathname(const char *, const char *);
+ #define MAIL_ATTR_FLAGS		"flags"
+ #define MAIL_ATTR_QUEUE		"queue_name"
+ #define MAIL_ATTR_QUEUEID	"queue_id"
++#define MAIL_ATTR_DSN_ORIG_QUEUEID "dsn_original_queue_id"
++#define MAIL_ATTR_DSN_ORIG_ENVELOPE "dsn_original_envelope"
+ #define MAIL_ATTR_SENDER	"sender"
+ #define MAIL_ATTR_RCPT_COUNT	"recipient_count"
+ #define MAIL_ATTR_ORCPT		"original_recipient"
+diff --git a/src/global/post_mail.c b/src/global/post_mail.c
+index f787acc..1f40ee0 100644
+--- a/src/global/post_mail.c
++++ b/src/global/post_mail.c
+@@ -24,6 +24,18 @@
+ /*	int	sendopts;
+ /*	VSTRING *queue_id;
+ /*
++/*	VSTREAM	*post_mail_fopen_dsn(sender, recipient, source_class,
++/*				trace_flags, sendopts, queue_id,
++/*				original_queue_id, original_envelope)
++/*	const char *sender;
++/*	const char *recipient;
++/*	int	source_class;
++/*	int	trace_flags;
++/*	int	sendopts;
++/*	VSTRING *queue_id;
++/*	const char *original_queue_id;
++/*	const char *original_envelope;
++/*
+ /*	void	post_mail_fopen_async(sender, recipient, source_class,
+ /*					trace_flags, sendopts,
+ /*					queue_id, notify, context)
+@@ -75,6 +87,11 @@
+ /*	only once, and does not wait until the cleanup service is
+ /*	available.  Otherwise it is identical to post_mail_fopen().
+ /*
++/*	post_mail_fopen_dsn() is a synchronous interface for the bounce
++/*	service. It connects to the private dsn_cleanup service and passes
++/*	the original queue ID and encoded original envelope as transient
++/*	attributes. Otherwise it is identical to post_mail_fopen().
++/*
+ /*	post_mail_fopen_async() contacts the cleanup service and
+ /*	invokes the caller-specified notify routine, with the
+ /*	open stream and the caller-specified context when the
+@@ -218,7 +235,9 @@ typedef struct {
+ static void post_mail_init(VSTREAM *stream, const char *sender,
+ 			           const char *recipient,
+ 			           int source_class, int trace_flags,
+-			           int sendopts, VSTRING *queue_id)
++			           int sendopts, VSTRING *queue_id,
++			           const char *original_queue_id,
++			           const char *original_envelope)
+ {
+     VSTRING *id = queue_id ? queue_id : vstring_alloc(100);
+     struct timeval now;
+@@ -271,6 +290,12 @@ static void post_mail_init(VSTREAM *stream, const char *sender,
+ 		MAIL_ATTR_LOG_ORIGIN, MAIL_ATTR_ORG_LOCAL);
+     rec_fprintf(stream, REC_TYPE_ATTR, "%s=%d",
+ 		MAIL_ATTR_TRACE_FLAGS, trace_flags);
++    if (original_queue_id != 0) {
++	rec_fprintf(stream, REC_TYPE_ATTR, "%s=%s",
++		    MAIL_ATTR_DSN_ORIG_QUEUEID, original_queue_id);
++	rec_fprintf(stream, REC_TYPE_ATTR, "%s=%s",
++		    MAIL_ATTR_DSN_ORIG_ENVELOPE, original_envelope);
++    }
+     rec_fputs(stream, REC_TYPE_FROM, sender);
+     rec_fputs(stream, REC_TYPE_RCPT, recipient);
+     rec_fputs(stream, REC_TYPE_MESG, "");
+@@ -297,7 +322,26 @@ VSTREAM *post_mail_fopen(const char *sender, const char *recipient,
+ 
+     stream = mail_connect_wait(MAIL_CLASS_PUBLIC, var_cleanup_service);
+     post_mail_init(stream, sender, recipient, source_class, trace_flags,
+-		   sendopts, queue_id);
++		   sendopts, queue_id, (const char *) 0, (const char *) 0);
++    return (stream);
++}
++
++/* post_mail_fopen_dsn - prepare a DSN with transient origin evidence */
++
++VSTREAM *post_mail_fopen_dsn(const char *sender, const char *recipient,
++			             int source_class, int trace_flags,
++			             int sendopts, VSTRING *queue_id,
++			             const char *original_queue_id,
++			             const char *original_envelope)
++{
++    VSTREAM *stream;
++
++    if (original_queue_id == 0 || original_envelope == 0)
++	msg_panic("post_mail_fopen_dsn: null evidence argument");
++    stream = mail_connect_wait(MAIL_CLASS_PRIVATE,
++			       MAIL_SERVICE_DSN_CLEANUP);
++    post_mail_init(stream, sender, recipient, source_class, trace_flags,
++		   sendopts, queue_id, original_queue_id, original_envelope);
+     return (stream);
+ }
+ 
+@@ -312,7 +356,7 @@ VSTREAM *post_mail_fopen_nowait(const char *sender, const char *recipient,
+     if ((stream = mail_connect(MAIL_CLASS_PUBLIC, var_cleanup_service,
+ 			       BLOCKING)) != 0)
+ 	post_mail_init(stream, sender, recipient, source_class, trace_flags,
+-		       sendopts, queue_id);
++		       sendopts, queue_id, (const char *) 0, (const char *) 0);
+     else
+ 	msg_warn("connect to %s/%s: %m",
+ 		 MAIL_CLASS_PUBLIC, var_cleanup_service);
+@@ -342,7 +386,7 @@ static void post_mail_open_event(int event, void *context)
+ 	post_mail_init(state->stream, state->sender,
+ 		       state->recipient, state->source_class,
+ 		       state->trace_flags, state->sendopts,
+-		       state->queue_id);
++		       state->queue_id, (const char *) 0, (const char *) 0);
+ 	myfree(state->sender);
+ 	myfree(state->recipient);
+ 	state->notify(state->stream, state->context);
+diff --git a/src/global/post_mail.h b/src/global/post_mail.h
+index 2e855c3..b7e0fb0 100644
+--- a/src/global/post_mail.h
++++ b/src/global/post_mail.h
+@@ -30,6 +30,8 @@
+   */
+ typedef void (*POST_MAIL_NOTIFY) (VSTREAM *, void *);
+ extern VSTREAM *post_mail_fopen(const char *, const char *, int, int, int, VSTRING *);
++extern VSTREAM *post_mail_fopen_dsn(const char *, const char *, int, int, int,
++				            VSTRING *, const char *, const char *);
+ extern VSTREAM *post_mail_fopen_nowait(const char *, const char *, int, int, int, VSTRING *);
+ extern void post_mail_fopen_async(const char *, const char *, int, int, int, VSTRING *, POST_MAIL_NOTIFY, void *);
+ extern int PRINTFLIKE(2, 3) post_mail_fprintf(VSTREAM *, const char *,...);
+-- 
+2.55.0
+

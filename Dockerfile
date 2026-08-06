@@ -8,6 +8,10 @@ ARG POSTFIX_SHA256=4a6ab3d0e9390989fa201fc6c446045fc702c4e16e7a247c3ae261c9e9bee
 ARG POSTFIX_SOURCE_URL=http://ftp.porcupine.org/mirrors/postfix-release/official/postfix-${POSTFIX_VERSION}.tar.gz
 ARG POSTFIX_EXTERNAL_PATCH_VERSION=3.11.5
 ARG POSTFIX_EXTERNAL_PATCH_SHA256=f6a27933d7b9c99d7debd3c2f779eb65864bbd72cbd01d63a08fff3a5a9a0929
+ARG POSTFIX_DSN_EVIDENCE_PATCH_VERSION=3.11.5
+ARG POSTFIX_DSN_EVIDENCE_PATCH_0001_SHA256=849c3c281c27dc720e0221e95739473b8bb421dd4a386309bc5cda37aec61f94
+ARG POSTFIX_DSN_EVIDENCE_PATCH_0002_SHA256=697a981c6bfbab0106c17f14cdd23bd9c131539ef05e412452736aec93066904
+ARG POSTFIX_DSN_EVIDENCE_PATCH_0003_SHA256=2edd6175d06da20bc9d99ac8fca5835763032d257bab8ea1c38ac9fb1d225a48
 ARG TLSRPT_VERSION=0.5.0
 ARG TLSRPT_GIT_TAG=v${TLSRPT_VERSION}
 ARG TINYCDB_VERSION=0.81
@@ -29,6 +33,10 @@ ARG POSTFIX_SHA256
 ARG POSTFIX_SOURCE_URL
 ARG POSTFIX_EXTERNAL_PATCH_VERSION
 ARG POSTFIX_EXTERNAL_PATCH_SHA256
+ARG POSTFIX_DSN_EVIDENCE_PATCH_VERSION
+ARG POSTFIX_DSN_EVIDENCE_PATCH_0001_SHA256
+ARG POSTFIX_DSN_EVIDENCE_PATCH_0002_SHA256
+ARG POSTFIX_DSN_EVIDENCE_PATCH_0003_SHA256
 ARG TLSRPT_GIT_TAG
 ARG TINYCDB_SHA256
 ARG TINYCDB_SOURCE_URL
@@ -70,6 +78,9 @@ RUN apk upgrade --no-cache \
 WORKDIR /tmp/build
 
 COPY patches/postfix-3.11.5-sasl-external-client-cert.patch postfix-sasl-external.patch
+COPY patches/postfix-3.11.5-dsn-evidence-0001.patch postfix-dsn-evidence-0001.patch
+COPY patches/postfix-3.11.5-dsn-evidence-0002.patch postfix-dsn-evidence-0002.patch
+COPY patches/postfix-3.11.5-dsn-evidence-0003.patch postfix-dsn-evidence-0003.patch
 
 RUN curl -fsSLo postfix.tgz "${POSTFIX_SOURCE_URL}" \
     && test "${POSTFIX_VERSION}" = "${POSTFIX_EXTERNAL_PATCH_VERSION}" \
@@ -79,7 +90,14 @@ RUN curl -fsSLo postfix.tgz "${POSTFIX_SOURCE_URL}" \
     && tar -xzf postfix.tgz \
     && mv "postfix-${POSTFIX_VERSION}" postfix \
     && echo "${POSTFIX_EXTERNAL_PATCH_SHA256}  postfix-sasl-external.patch" | sha256sum -c - \
-    && patch -d postfix -p1 < postfix-sasl-external.patch
+    && patch -d postfix -p1 < postfix-sasl-external.patch \
+    && test "${POSTFIX_VERSION}" = "${POSTFIX_DSN_EVIDENCE_PATCH_VERSION}" \
+    && echo "${POSTFIX_DSN_EVIDENCE_PATCH_0001_SHA256}  postfix-dsn-evidence-0001.patch" | sha256sum -c - \
+    && echo "${POSTFIX_DSN_EVIDENCE_PATCH_0002_SHA256}  postfix-dsn-evidence-0002.patch" | sha256sum -c - \
+    && echo "${POSTFIX_DSN_EVIDENCE_PATCH_0003_SHA256}  postfix-dsn-evidence-0003.patch" | sha256sum -c - \
+    && patch -d postfix -p1 < postfix-dsn-evidence-0001.patch \
+    && patch -d postfix -p1 < postfix-dsn-evidence-0002.patch \
+    && patch -d postfix -p1 < postfix-dsn-evidence-0003.patch
 
 RUN git clone --depth 1 --branch "${TLSRPT_GIT_TAG}" https://github.com/sys4/libtlsrpt.git libtlsrpt \
     && curl -fsSLo tinycdb.tgz "${TINYCDB_SOURCE_URL}" \

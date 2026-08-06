@@ -1,0 +1,574 @@
+From 4186b232de38c0f8f83c4198883c1327ac3f3540 Mon Sep 17 00:00:00 2001
+From: Christian Roessner <c@roessner.co>
+Date: Thu, 6 Aug 2026 12:39:58 +0200
+Subject: [PATCH 3/3] bounce: expose trusted origin evidence to Milters at EOH
+
+Capture the exact envelope sender and recipient records while bounce(8)
+already scans the original queue file. Treat a DONE record as the in-place
+replacement of an original RCPT record, and exclude canceled recipients.
+Encode a bounded, versioned binary record as unpadded base64url.
+
+Use the private dsn_cleanup path for the null-sender notifications produced
+by bounce_notify_service(), bounce_warn_service(), bounce_one_service(),
+and bounce_notify_verp(). If complete evidence is unavailable, retain the
+existing best-effort public cleanup path and do not assert provenance.
+
+Expose the provenance marker, original queue ID, and original envelope only
+as requested end-of-header Milter macros. They are absent at all earlier
+events and for messages that did not arrive through the private handoff.
+Action and status remain in the RFC 3464 delivery-status part and are not
+duplicated in macro values.
+
+Use the EOH macro class because milter8_message() supplies eod_macros with
+BODY chunks as well as SMFIC_BODYEOB. EOH is the standard once-per-message
+stage immediately before the DSN body; the filter retains the provenance and
+does not act until EOM.
+
+The Milter wire protocol is unchanged. Filters opt in through normal macro
+negotiation, and filters that do not request the new names are unaffected.
+
+Tested with:
+
+    make -j4
+    make -C src/milter tests
+    make -C src/cleanup test_cleanup_envelope
+
+The bounce test vector validates the exact unpadded base64url value. The
+stock bounce reference-test wrapper needs non-conflicting Postfix service
+accounts and therefore cannot run unchanged on macOS installations that
+provide both postfix/_postfix and postdrop/_postdrop aliases.
+---
+ src/bounce/Makefile.in                 |  12 ++-
+ src/bounce/bounce_notify_service.c     |   9 +--
+ src/bounce/bounce_notify_util.c        | 101 +++++++++++++++++++++++++
+ src/bounce/bounce_notify_util_tester.c |  10 ++-
+ src/bounce/bounce_notify_verp.c        |   9 +--
+ src/bounce/bounce_one_service.c        |   9 +--
+ src/bounce/bounce_service.h            |   5 ++
+ src/bounce/bounce_warn_service.c       |   9 +--
+ src/cleanup/cleanup_envelope.c         |   3 +-
+ src/cleanup/cleanup_milter.c           |  26 ++++++-
+ src/global/post_mail.c                 |  37 +++++++++
+ src/global/post_mail.h                 |   3 +
+ 12 files changed, 204 insertions(+), 29 deletions(-)
+
+diff --git a/src/bounce/Makefile.in b/src/bounce/Makefile.in
+index 957ccbe..dcba306 100644
+--- a/src/bounce/Makefile.in
++++ b/src/bounce/Makefile.in
+@@ -56,6 +56,8 @@ tidy:	clean
+ BOUNCE_NOTIFY_UTIL_TESTER_OBJS = bounce_notify_util_tester.o \
+ 	bounce_notify_util.o bounce_template.o bounce_templates.o
+ 
++TEST_DSN_EVIDENCE = AQAVc2VuZGVyQHNlbmRlci5leGFtcGxlAAEAG3JlY2lwaWVudEByZWNpcGllbnQuZXhhbXBsZQ
++
+ bounce_notify_util_tester: $(BOUNCE_NOTIFY_UTIL_TESTER_OBJS) $(LIBS)
+ 	$(CC) -DTEST $(CFLAGS) -o $@ $(BOUNCE_NOTIFY_UTIL_TESTER_OBJS) \
+ 	$(LIBS) $(SYSLIBS)
+@@ -107,7 +109,7 @@ with-message-id_test: bounce_notify_util_tester \
+ 	cp logfile-with-message-id queue/bounce/msgid
+ 	cp msgfile-with-message-id queue/active/msgid
+ 	$(SHLIB_ENV) $(VALGRIND) ./bounce_notify_util_tester \
+-	    -c. bounce active msgid 2>&1 | \
++	    -c. bounce active msgid $(TEST_DSN_EVIDENCE) 2>&1 | \
+ 	    sed 's;msgid.[0-9]*/mail.example;msgid.unix-time/mail.example;' \
+ 	    > with-message-id-no-thread.tmp
+ 	diff with-message-id-no-thread.ref with-message-id-no-thread.tmp
+@@ -122,7 +124,7 @@ with-message-id_test: bounce_notify_util_tester \
+ 	cp logfile-with-message-id queue/bounce/msgid
+ 	cp msgfile-with-message-id queue/active/msgid
+ 	$(SHLIB_ENV) $(VALGRIND) ./bounce_notify_util_tester \
+-	    -c. bounce active msgid 2>&1 | \
++	    -c. bounce active msgid $(TEST_DSN_EVIDENCE) 2>&1 | \
+ 	    sed 's;msgid.[0-9]*/mail.example;msgid.unix-time/mail.example;' \
+ 	    > with-message-id-with-thread.tmp
+ 	diff with-message-id-with-thread.ref with-message-id-with-thread.tmp
+@@ -142,7 +144,7 @@ no-message-id_test: bounce_notify_util_tester \
+ 	cp logfile-no-message-id queue/bounce/msgid
+ 	cp msgfile-no-message-id queue/active/msgid
+ 	$(SHLIB_ENV) $(VALGRIND) ./bounce_notify_util_tester \
+-	    -c. bounce active msgid 2>&1 | \
++	    -c. bounce active msgid $(TEST_DSN_EVIDENCE) 2>&1 | \
+ 	    sed 's;msgid.[0-9]*/mail.example;msgid.unix-time/mail.example;' \
+ 	    > no-message-id-no-thread.tmp
+ 	diff no-message-id-no-thread.ref no-message-id-no-thread.tmp
+@@ -157,7 +159,7 @@ no-message-id_test: bounce_notify_util_tester \
+ 	cp logfile-no-message-id queue/bounce/msgid
+ 	cp msgfile-no-message-id queue/active/msgid
+ 	$(SHLIB_ENV) $(VALGRIND) ./bounce_notify_util_tester \
+-	    -c. bounce active msgid 2>&1 | \
++	    -c. bounce active msgid $(TEST_DSN_EVIDENCE) 2>&1 | \
+ 	    sed 's;msgid.[0-9]*/mail.example;msgid.unix-time/mail.example;' \
+ 	    > no-message-id-with-thread.tmp
+ 	diff no-message-id-with-thread.ref no-message-id-with-thread.tmp
+@@ -293,7 +295,9 @@ bounce_notify_service.o: ../../include/vstring.h
+ bounce_notify_service.o: bounce_notify_service.c
+ bounce_notify_service.o: bounce_service.h
+ bounce_notify_service.o: bounce_template.h
++bounce_notify_util.o: ../../include/argv.h
+ bounce_notify_util.o: ../../include/attr.h
++bounce_notify_util.o: ../../include/base64_code.h
+ bounce_notify_util.o: ../../include/bounce_log.h
+ bounce_notify_util.o: ../../include/check_arg.h
+ bounce_notify_util.o: ../../include/cleanup_user.h
+diff --git a/src/bounce/bounce_notify_service.c b/src/bounce/bounce_notify_service.c
+index c6004c0..2326021 100644
+--- a/src/bounce/bounce_notify_service.c
++++ b/src/bounce/bounce_notify_service.c
+@@ -220,11 +220,10 @@ int     bounce_notify_service(int flags, char *service, char *queue_name,
+      * NOTIFY restrictions.
+      */
+     else {
+-	if ((bounce = post_mail_fopen_nowait(NULL_SENDER, recipient,
+-					     MAIL_SRC_MASK_BOUNCE,
+-					     NULL_TRACE_FLAGS,
+-					     sendopts,
+-					     new_id)) != 0) {
++	if ((bounce = bounce_mail_fopen(bounce_info, recipient,
++				       MAIL_SRC_MASK_BOUNCE,
++				       NULL_TRACE_FLAGS,
++				       sendopts, new_id)) != 0) {
+ 
+ 	    /*
+ 	     * Send the bounce message header, some boilerplate text that
+diff --git a/src/bounce/bounce_notify_util.c b/src/bounce/bounce_notify_util.c
+index 38112f8..e23fbf0 100644
+--- a/src/bounce/bounce_notify_util.c
++++ b/src/bounce/bounce_notify_util.c
+@@ -210,6 +210,8 @@
+ #include <dsn_mask.h>
+ #include <smtputf8.h>
+ #include <header_opts.h>
++#include <base64_code.h>
++#include <argv.h>
+ 
+ /* Application-specific. */
+ 
+@@ -218,6 +220,51 @@
+ #define STR vstring_str
+ #define LEN VSTRING_LEN
+ 
++#define BOUNCE_DSN_EVIDENCE_VERSION	1
++#define BOUNCE_DSN_ADDRESS_LIMIT	254
++#define BOUNCE_DSN_RECIPIENT_LIMIT	256
++#define BOUNCE_DSN_DECODED_LIMIT	(47 * 1024)
++
++/* bounce_dsn_put_u16 - append a big-endian unsigned 16-bit value */
++
++static void bounce_dsn_put_u16(VSTRING *buffer, ssize_t value)
++{
++    VSTRING_ADDCH(buffer, (value >> 8) & 0xff);
++    VSTRING_ADDCH(buffer, value & 0xff);
++}
++
++/* bounce_dsn_envelope_encode - encode the original SMTP envelope */
++
++static void bounce_dsn_envelope_encode(BOUNCE_INFO *bounce_info)
++{
++    VSTRING *raw = vstring_alloc(100);
++    char  **recipient;
++
++    VSTRING_ADDCH(raw, BOUNCE_DSN_EVIDENCE_VERSION);
++    bounce_dsn_put_u16(raw, LEN(bounce_info->dsn_sender));
++    vstring_memcat(raw, STR(bounce_info->dsn_sender),
++		   LEN(bounce_info->dsn_sender));
++    bounce_dsn_put_u16(raw, bounce_info->dsn_recipients->argc);
++    for (recipient = bounce_info->dsn_recipients->argv;
++	 *recipient != 0; recipient++) {
++	bounce_dsn_put_u16(raw, strlen(*recipient));
++	vstring_strcat(raw, *recipient);
++    }
++    if (LEN(raw) > BOUNCE_DSN_DECODED_LIMIT) {
++	vstring_free(raw);
++	return;
++    }
++    base64_encode(bounce_info->dsn_original_envelope, STR(raw), LEN(raw));
++    translit(STR(bounce_info->dsn_original_envelope), "+/", "-_");
++    while (LEN(bounce_info->dsn_original_envelope) > 0
++	   && STR(bounce_info->dsn_original_envelope)
++	   [LEN(bounce_info->dsn_original_envelope) - 1] == '=')
++	vstring_truncate(bounce_info->dsn_original_envelope,
++			 LEN(bounce_info->dsn_original_envelope) - 1);
++    VSTRING_TERMINATE(bounce_info->dsn_original_envelope);
++    vstring_free(raw);
++}
++
+ /* bounce_mail_alloc - initialize */
+ 
+ static BOUNCE_INFO *bounce_mail_alloc(const char *service,
+@@ -234,6 +281,9 @@ static BOUNCE_INFO *bounce_mail_alloc(const char *service,
+     BOUNCE_INFO *bounce_info;
+     int     rec_type;
+     int     skip_message_segment = 0;
++    int     envelope_complete = 0;
++    int     dsn_sender_seen = 0;
++    int     dsn_envelope_ok = 1;
+ 
+     /*
+      * Bundle up a bunch of parameters and initialize information that will
+@@ -269,6 +319,9 @@ static BOUNCE_INFO *bounce_mail_alloc(const char *service,
+     bounce_info->template = template;
+     bounce_info->buf = vstring_alloc(100);
+     bounce_info->sender = vstring_alloc(100);
++    bounce_info->dsn_sender = vstring_alloc(100);
++    bounce_info->dsn_recipients = argv_alloc(10);
++    bounce_info->dsn_original_envelope = vstring_alloc(100);
+     bounce_info->arrival_time = 0;
+     bounce_info->orig_offs = 0;
+     bounce_info->message_size = 0;
+@@ -352,6 +405,13 @@ static BOUNCE_INFO *bounce_mail_alloc(const char *service,
+ 	     * Information for the X-Postfix-Sender: attribute.
+ 	     */
+ 	    else if (rec_type == REC_TYPE_FROM) {
++		if (dsn_sender_seen == 0) {
++		    vstring_memcpy(bounce_info->dsn_sender,
++				   STR(bounce_info->buf), LEN(bounce_info->buf));
++		    dsn_sender_seen = 1;
++		    if (LEN(bounce_info->dsn_sender) > BOUNCE_DSN_ADDRESS_LIMIT)
++			dsn_envelope_ok = 0;
++		}
+ 		quote_822_local_flags(bounce_info->sender,
+ 				      VSTRING_LEN(bounce_info->buf) ?
+ 				      STR(bounce_info->buf) :
+@@ -359,6 +419,23 @@ static BOUNCE_INFO *bounce_mail_alloc(const char *service,
+ 				      QUOTE_FLAG_8BITCLEAN);
+ 	    }
+ 
++	    /*
++	     * Exact original envelope recipients for trusted DSN evidence.
++	     * REC_TYPE_DONE is an in-place update of REC_TYPE_RCPT.
++	     */
++	    else if (envelope_complete == 0
++		     && (rec_type == REC_TYPE_RCPT
++			 || rec_type == REC_TYPE_DONE)) {
++		if (bounce_info->dsn_recipients->argc
++		    >= BOUNCE_DSN_RECIPIENT_LIMIT
++		    || LEN(bounce_info->buf) > BOUNCE_DSN_ADDRESS_LIMIT) {
++		    dsn_envelope_ok = 0;
++		} else {
++		    argv_add(bounce_info->dsn_recipients,
++			     STR(bounce_info->buf), (char *) 0);
++		}
++	    }
++
+ 	    /*
+ 	     * Backwards compatibility: no data offset in SIZE record.
+ 	     */
+@@ -369,6 +446,7 @@ static BOUNCE_INFO *bounce_mail_alloc(const char *service,
+ 			     bounce_info->queue_id);
+ 		bounce_info->orig_offs = vstream_ftell(bounce_info->orig_fp);
+ 		skip_message_segment = 1;
++		envelope_complete = 1;
+ 	    }
+ 
+ 	    /*
+@@ -398,6 +476,7 @@ static BOUNCE_INFO *bounce_mail_alloc(const char *service,
+ 	    if (bounce_info->orig_offs > 0
+ 		&& bounce_info->arrival_time > 0
+ 		&& VSTRING_LEN(bounce_info->sender) > 0
++		&& envelope_complete
+ 		&& (var_threaded_bounce == 0
+ 		    || VSTRING_LEN(bounce_info->orig_msgid) > 0)) {
+ 		break;
+@@ -417,6 +496,9 @@ static BOUNCE_INFO *bounce_mail_alloc(const char *service,
+ 	    }
+ 	}
+     }
++    if (dsn_envelope_ok && dsn_sender_seen
++	&& bounce_info->dsn_recipients->argc > 0)
++	bounce_dsn_envelope_encode(bounce_info);
+     return (bounce_info);
+ }
+ 
+@@ -498,11 +580,30 @@ void    bounce_mail_free(BOUNCE_INFO *bounce_info)
+ 		 bounce_info->queue_id);
+     vstring_free(bounce_info->buf);
+     vstring_free(bounce_info->sender);
++    vstring_free(bounce_info->dsn_sender);
++    argv_free(bounce_info->dsn_recipients);
++    vstring_free(bounce_info->dsn_original_envelope);
+     myfree(bounce_info->mail_name);
+     myfree((void *) bounce_info->mime_boundary);
+     myfree((void *) bounce_info);
+ }
+ 
++/* bounce_mail_fopen - post a null-sender DSN with origin evidence */
++
++VSTREAM *bounce_mail_fopen(BOUNCE_INFO *bounce_info, const char *recipient,
++			           int source_class, int trace_flags,
++			           int sendopts, VSTRING *queue_id)
++{
++    if (LEN(bounce_info->dsn_original_envelope) > 0)
++	return (post_mail_fopen_dsn_nowait(MAIL_ADDR_EMPTY, recipient,
++					    source_class, trace_flags,
++					    sendopts, queue_id,
++					    bounce_info->queue_id,
++					    STR(bounce_info->dsn_original_envelope)));
++    return (post_mail_fopen_nowait(MAIL_ADDR_EMPTY, recipient, source_class,
++				  trace_flags, sendopts, queue_id));
++}
++
+ /* bounce_header - generate bounce message header */
+ 
+ int     bounce_header(VSTREAM *bounce, BOUNCE_INFO *bounce_info,
+diff --git a/src/bounce/bounce_notify_util_tester.c b/src/bounce/bounce_notify_util_tester.c
+index 3151ced..a509186 100644
+--- a/src/bounce/bounce_notify_util_tester.c
++++ b/src/bounce/bounce_notify_util_tester.c
+@@ -3,6 +3,7 @@
+   */
+ #include <sys_defs.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <sys/stat.h>
+ 
+  /*
+@@ -54,8 +55,9 @@ static void test_driver(int argc, char **argv)
+     /*
+      * Sanity checks.
+      */
+-    if (argc != 4)
+-	msg_fatal("usage: %s [options] service queue_name queue_id", argv[0]);
++    if (argc != 4 && argc != 5)
++	msg_fatal("usage: %s [options] service queue_name queue_id "
++		  "[expected_dsn_evidence]", argv[0]);
+ 
+     if (chdir(var_queue_dir) < 0)
+ 	msg_fatal("chdir %s: %m", var_queue_dir);
+@@ -73,6 +75,10 @@ static void test_driver(int argc, char **argv)
+     bounce_info = bounce_mail_init(argv[1], argv[2], argv[3],
+ 				 TEST_ENCODING, NO_SMTPUTF8, TEST_DSN_ENVID,
+ 				   bounce_templates->failure);
++    if (argc == 5
++	&& strcmp(STR(bounce_info->dsn_original_envelope), argv[4]) != 0)
++	msg_fatal("DSN evidence: got '%s', want '%s'",
++		  STR(bounce_info->dsn_original_envelope), argv[4]);
+     if (bounce_header(message_stream, bounce_info, TEST_RECIPIENT,
+ 		      NO_POSTMASTER_COPY) < 0)
+ 	msg_fatal("bounce_header: %m");
+diff --git a/src/bounce/bounce_notify_verp.c b/src/bounce/bounce_notify_verp.c
+index e084459..eec7f50 100644
+--- a/src/bounce/bounce_notify_verp.c
++++ b/src/bounce/bounce_notify_verp.c
+@@ -163,11 +163,10 @@ int     bounce_notify_verp(int flags, char *service, char *queue_name,
+ 	    bounce_status = 0;
+ 	} else {
+ 	    verp_sender(verp_buf, verp_delims, recipient, rcpt);
+-	    if ((bounce = post_mail_fopen_nowait(NULL_SENDER, STR(verp_buf),
+-						 MAIL_SRC_MASK_BOUNCE,
+-						 NULL_TRACE_FLAGS,
+-						 sendopts,
+-						 new_id)) != 0) {
++	    if ((bounce = bounce_mail_fopen(bounce_info, STR(verp_buf),
++					   MAIL_SRC_MASK_BOUNCE,
++					   NULL_TRACE_FLAGS,
++					   sendopts, new_id)) != 0) {
+ 
+ 		/*
+ 		 * Send the bounce message header, some boilerplate text that
+diff --git a/src/bounce/bounce_one_service.c b/src/bounce/bounce_one_service.c
+index 2524cbc..3bd0d6f 100644
+--- a/src/bounce/bounce_one_service.c
++++ b/src/bounce/bounce_one_service.c
+@@ -186,11 +186,10 @@ int     bounce_one_service(int flags, char *queue_name, char *queue_id,
+ 	    && (rcpt->dsn_notify & DSN_NOTIFY_FAILURE) == 0) {
+ 	    bounce_status = 0;
+ 	} else {
+-	    if ((bounce = post_mail_fopen_nowait(NULL_SENDER, orig_sender,
+-						 MAIL_SRC_MASK_BOUNCE,
+-						 NULL_TRACE_FLAGS,
+-						 sendopts,
+-						 new_id)) != 0) {
++	    if ((bounce = bounce_mail_fopen(bounce_info, orig_sender,
++					   MAIL_SRC_MASK_BOUNCE,
++					   NULL_TRACE_FLAGS,
++					   sendopts, new_id)) != 0) {
+ 
+ 		/*
+ 		 * Send the bounce message header, some boilerplate text that
+diff --git a/src/bounce/bounce_service.h b/src/bounce/bounce_service.h
+index 21e323c..6876ed6 100644
+--- a/src/bounce/bounce_service.h
++++ b/src/bounce/bounce_service.h
+@@ -81,6 +81,9 @@ typedef struct {
+     BOUNCE_TEMPLATE *template;		/* bounce message template */
+     VSTRING *buf;			/* scratch pad */
+     VSTRING *sender;			/* envelope sender */
++    VSTRING *dsn_sender;		/* exact original envelope sender */
++    struct ARGV *dsn_recipients;	/* exact original recipients */
++    VSTRING *dsn_original_envelope;	/* encoded origin evidence */
+     VSTREAM *orig_fp;			/* open queue file */
+     long    orig_offs;			/* start of content */
+     time_t  arrival_time;		/* time of arrival */
+@@ -98,6 +101,8 @@ typedef struct {
+ extern BOUNCE_INFO *bounce_mail_init(const char *, const char *, const char *, const char *, int, const char *, BOUNCE_TEMPLATE *);
+ extern BOUNCE_INFO *bounce_mail_one_init(const char *, const char *, const char *, int, const char *, RCPT_BUF *, DSN_BUF *, BOUNCE_TEMPLATE *);
+ extern void bounce_mail_free(BOUNCE_INFO *);
++extern VSTREAM *bounce_mail_fopen(BOUNCE_INFO *, const char *, int, int, int,
++				          VSTRING *);
+ extern int bounce_header(VSTREAM *, BOUNCE_INFO *, const char *, int);
+ extern int bounce_boilerplate(VSTREAM *, BOUNCE_INFO *);
+ extern int bounce_recipient_log(VSTREAM *, BOUNCE_INFO *);
+diff --git a/src/bounce/bounce_warn_service.c b/src/bounce/bounce_warn_service.c
+index 84ea222..30a057a 100644
+--- a/src/bounce/bounce_warn_service.c
++++ b/src/bounce/bounce_warn_service.c
+@@ -208,11 +208,10 @@ int     bounce_warn_service(int unused_flags, char *service, char *queue_name,
+      * restrictions.
+      */
+     else {
+-	if ((bounce = post_mail_fopen_nowait(NULL_SENDER, recipient,
+-					     MAIL_SRC_MASK_BOUNCE,
+-					     NULL_TRACE_FLAGS,
+-					     sendopts,
+-					     new_id)) != 0) {
++	if ((bounce = bounce_mail_fopen(bounce_info, recipient,
++				       MAIL_SRC_MASK_BOUNCE,
++				       NULL_TRACE_FLAGS,
++				       sendopts, new_id)) != 0) {
+ 
+ 	    /*
+ 	     * Send the bounce message header, some boilerplate text that
+diff --git a/src/cleanup/cleanup_envelope.c b/src/cleanup/cleanup_envelope.c
+index e0e41a3..e2f521d 100644
+--- a/src/cleanup/cleanup_envelope.c
++++ b/src/cleanup/cleanup_envelope.c
+@@ -383,7 +383,8 @@ static void cleanup_envelope_process(CLEANUP_STATE *state, int type,
+     if (type == REC_TYPE_MESG) {
+ 	if (state->dsn_evidence_allowed
+ 	    && (state->dsn_original_queue_id == 0
+-		|| state->dsn_original_envelope == 0)) {
++		|| state->dsn_original_envelope == 0
++		|| state->sender == 0 || *state->sender != 0)) {
+ 	    msg_warn("%s: message rejected: incomplete DSN origin evidence",
+ 		     state->queue_id);
+ 	    state->errs |= CLEANUP_STAT_BAD;
+diff --git a/src/cleanup/cleanup_milter.c b/src/cleanup/cleanup_milter.c
+index 9c894d7..00c25c7 100644
+--- a/src/cleanup/cleanup_milter.c
++++ b/src/cleanup/cleanup_milter.c
+@@ -1992,6 +1992,26 @@ static const char *cleanup_milter_eval(const char *name, void *ptr)
+     return (0);
+ }
+ 
++/* cleanup_milter_eval_event - expand event-specific macro */
++
++static const char *cleanup_milter_eval_event(const char *name, int event,
++			                     void *ptr)
++{
++    CLEANUP_STATE *state = (CLEANUP_STATE *) ptr;
++
++    if (event == MILTER_MACRO_EVENT_EOH
++	&& state->dsn_original_queue_id != 0
++	&& state->dsn_original_envelope != 0) {
++	if (strcmp(name, "{postfix_dsn_evidence}") == 0)
++	    return ("postfix-dsn-evidence-v1");
++	if (strcmp(name, "{postfix_dsn_original_queue_id}") == 0)
++	    return (state->dsn_original_queue_id);
++	if (strcmp(name, "{postfix_dsn_original_envelope}") == 0)
++	    return (state->dsn_original_envelope);
++    }
++    return (cleanup_milter_eval(name, ptr));
++}
++
+ /* cleanup_milter_receive - receive milter instances */
+ 
+ void    cleanup_milter_receive(CLEANUP_STATE *state, int count)
+@@ -2003,7 +2023,8 @@ void    cleanup_milter_receive(CLEANUP_STATE *state, int count)
+ 	msg_fatal("cleanup_milter_receive: milter receive failed");
+     if (count <= 0)
+ 	return;
+-    milter_macro_callback(state->milters, cleanup_milter_eval, (void *) state);
++    milter_macro_callback_event(state->milters, cleanup_milter_eval_event,
++				(void *) state);
+     milter_edit_callback(state->milters,
+ 			 cleanup_add_header, cleanup_upd_header,
+ 			 cleanup_ins_header, cleanup_del_header,
+@@ -2229,7 +2250,8 @@ void    cleanup_milter_emul_mail(CLEANUP_STATE *state,
+     /*
+      * Per-connection initialization.
+      */
+-    milter_macro_callback(milters, cleanup_milter_eval, (void *) state);
++    milter_macro_callback_event(milters, cleanup_milter_eval_event,
++				(void *) state);
+     milter_edit_callback(milters,
+ 			 cleanup_add_header, cleanup_upd_header,
+ 			 cleanup_ins_header, cleanup_del_header,
+diff --git a/src/global/post_mail.c b/src/global/post_mail.c
+index 1f40ee0..7dec0dd 100644
+--- a/src/global/post_mail.c
++++ b/src/global/post_mail.c
+@@ -36,6 +36,18 @@
+ /*	const char *original_queue_id;
+ /*	const char *original_envelope;
+ /*
++/*	VSTREAM	*post_mail_fopen_dsn_nowait(sender, recipient, source_class,
++/*				trace_flags, sendopts, queue_id,
++/*				original_queue_id, original_envelope)
++/*	const char *sender;
++/*	const char *recipient;
++/*	int	source_class;
++/*	int	trace_flags;
++/*	int	sendopts;
++/*	VSTRING *queue_id;
++/*	const char *original_queue_id;
++/*	const char *original_envelope;
++/*
+ /*	void	post_mail_fopen_async(sender, recipient, source_class,
+ /*					trace_flags, sendopts,
+ /*					queue_id, notify, context)
+@@ -92,6 +104,9 @@
+ /*	the original queue ID and encoded original envelope as transient
+ /*	attributes. Otherwise it is identical to post_mail_fopen().
+ /*
++/*	post_mail_fopen_dsn_nowait() tries to contact the private cleanup
++/*	service only once. Otherwise it is identical to post_mail_fopen_dsn().
++/*
+ /*	post_mail_fopen_async() contacts the cleanup service and
+ /*	invokes the caller-specified notify routine, with the
+ /*	open stream and the caller-specified context when the
+@@ -345,6 +360,28 @@ VSTREAM *post_mail_fopen_dsn(const char *sender, const char *recipient,
+     return (stream);
+ }
+ 
++/* post_mail_fopen_dsn_nowait - prepare a DSN without waiting for cleanup */
++
++VSTREAM *post_mail_fopen_dsn_nowait(const char *sender, const char *recipient,
++			                    int source_class, int trace_flags,
++			                    int sendopts, VSTRING *queue_id,
++			                    const char *original_queue_id,
++			                    const char *original_envelope)
++{
++    VSTREAM *stream;
++
++    if (original_queue_id == 0 || original_envelope == 0)
++	msg_panic("post_mail_fopen_dsn_nowait: null evidence argument");
++    if ((stream = mail_connect(MAIL_CLASS_PRIVATE,
++			       MAIL_SERVICE_DSN_CLEANUP, BLOCKING)) != 0)
++	post_mail_init(stream, sender, recipient, source_class, trace_flags,
++		       sendopts, queue_id, original_queue_id, original_envelope);
++    else
++	msg_warn("connect to %s/%s: %m", MAIL_CLASS_PRIVATE,
++		 MAIL_SERVICE_DSN_CLEANUP);
++    return (stream);
++}
++
+ /* post_mail_fopen_nowait - prepare for posting a message */
+ 
+ VSTREAM *post_mail_fopen_nowait(const char *sender, const char *recipient,
+diff --git a/src/global/post_mail.h b/src/global/post_mail.h
+index b7e0fb0..7efc6d3 100644
+--- a/src/global/post_mail.h
++++ b/src/global/post_mail.h
+@@ -32,6 +32,9 @@ typedef void (*POST_MAIL_NOTIFY) (VSTREAM *, void *);
+ extern VSTREAM *post_mail_fopen(const char *, const char *, int, int, int, VSTRING *);
+ extern VSTREAM *post_mail_fopen_dsn(const char *, const char *, int, int, int,
+ 				            VSTRING *, const char *, const char *);
++extern VSTREAM *post_mail_fopen_dsn_nowait(const char *, const char *, int,
++				                   int, int, VSTRING *,
++				                   const char *, const char *);
+ extern VSTREAM *post_mail_fopen_nowait(const char *, const char *, int, int, int, VSTRING *);
+ extern void post_mail_fopen_async(const char *, const char *, int, int, int, VSTRING *, POST_MAIL_NOTIFY, void *);
+ extern int PRINTFLIKE(2, 3) post_mail_fprintf(VSTREAM *, const char *,...);
+-- 
+2.55.0
