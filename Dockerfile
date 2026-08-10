@@ -180,6 +180,15 @@ RUN export CCARGS="$(pcre2-config --cflags) -DUSE_TLS -DUSE_SASL_AUTH -DUSE_CYRU
     && cp conf/master.cf /tmp/default-config/master.cf \
     && cp /tmp/out/etc/postfix/dynamicmaps.cf /tmp/default-config/dynamicmaps.cf
 
+RUN apk add --no-cache tzdata \
+    && addgroup -S postdrop \
+    && addgroup -S postfix \
+    && adduser -S -D -H -G postfix postfix
+
+RUN make -C src/cleanup test_cleanup_envelope \
+    && TZ=America/New_York make -C src/bounce \
+        with-message-id_test no-message-id_test
+
 FROM --platform=$TARGETPLATFORM alpine:${ALPINE_VERSION}
 
 ARG ALPINE_VERSION
