@@ -1,4 +1,4 @@
-From 5fb1454e7903eacb9e783f227de0bf98fd614eaf Mon Sep 17 00:00:00 2001
+From d72d9939bc7c3257e98d295448a0bd710cf47683 Mon Sep 17 00:00:00 2001
 From: Christian Roessner <c@roessner.co>
 Date: Mon, 10 Aug 2026 14:45:54 +0200
 Subject: [PATCH 2/2] milter: expose local DSN origin evidence
@@ -14,7 +14,7 @@ Document configuration, record format, consumer validation, and the use of the n
  4 files changed, 117 insertions(+), 1 deletion(-)
 
 diff --git a/README_FILES/MILTER_README b/README_FILES/MILTER_README
-index aafc69396..b6799963b 100644
+index aafc693..b679996 100644
 --- a/README_FILES/MILTER_README
 +++ b/README_FILES/MILTER_README
 @@ -279,6 +279,37 @@ non_smtpd_milters, header_checks or body_checks (lines 3-5 below).
@@ -61,7 +61,7 @@ index aafc69396..b6799963b 100644
      error handling, etc.
 -
 diff --git a/html/MILTER_README.html b/html/MILTER_README.html
-index 841584026..cf76fcd65 100644
+index 8415840..cf76fcd 100644
 --- a/html/MILTER_README.html
 +++ b/html/MILTER_README.html
 @@ -469,6 +469,44 @@ or <a href="postconf.5.html#body_checks">body_checks</a> (lines 3-5 below).  </p
@@ -110,7 +110,7 @@ index 841584026..cf76fcd65 100644
  
  <p> The <a href="postconf.5.html#milter_default_action">milter_default_action</a> parameter specifies how Postfix handles
 diff --git a/proto/MILTER_README.html b/proto/MILTER_README.html
-index c8a557767..b97dc7291 100644
+index c8a5577..b97dc72 100644
 --- a/proto/MILTER_README.html
 +++ b/proto/MILTER_README.html
 @@ -469,6 +469,44 @@ or body_checks (lines 3-5 below).  </p>
@@ -159,7 +159,7 @@ index c8a557767..b97dc7291 100644
  
  <p> The milter_default_action parameter specifies how Postfix handles
 diff --git a/src/cleanup/cleanup_milter.c b/src/cleanup/cleanup_milter.c
-index 9c894d7e6..2f6cb0983 100644
+index 9c894d7..2f6cb09 100644
 --- a/src/cleanup/cleanup_milter.c
 +++ b/src/cleanup/cleanup_milter.c
 @@ -236,6 +236,10 @@ static const char *cleanup_add_rcpt_par(void *, const char *, const char *);

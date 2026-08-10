@@ -1,4 +1,4 @@
-From dc4bde350359ebe07a99b760bb5377592e2a1866 Mon Sep 17 00:00:00 2001
+From 8022bed7afb883c06bc053b2bf27ff46dae8c7a6 Mon Sep 17 00:00:00 2001
 From: Christian Roessner <c@roessner.co>
 Date: Mon, 10 Aug 2026 14:45:42 +0200
 Subject: [PATCH 1/2] bounce: pass DSN origin evidence through cleanup
@@ -28,7 +28,7 @@ Keep the evidence in transient cleanup state, reject inconsistent input, and fal
  18 files changed, 373 insertions(+), 31 deletions(-)
 
 diff --git a/src/bounce/Makefile.in b/src/bounce/Makefile.in
-index 957ccbed4..dcba306d7 100644
+index 957ccbe..dcba306 100644
 --- a/src/bounce/Makefile.in
 +++ b/src/bounce/Makefile.in
 @@ -56,6 +56,8 @@ tidy:	clean
@@ -87,7 +87,7 @@ index 957ccbed4..dcba306d7 100644
  bounce_notify_util.o: ../../include/check_arg.h
  bounce_notify_util.o: ../../include/cleanup_user.h
 diff --git a/src/bounce/bounce_notify_service.c b/src/bounce/bounce_notify_service.c
-index c6004c0bf..23260218d 100644
+index c6004c0..2326021 100644
 --- a/src/bounce/bounce_notify_service.c
 +++ b/src/bounce/bounce_notify_service.c
 @@ -220,11 +220,10 @@ int     bounce_notify_service(int flags, char *service, char *queue_name,
@@ -107,7 +107,7 @@ index c6004c0bf..23260218d 100644
  	    /*
  	     * Send the bounce message header, some boilerplate text that
 diff --git a/src/bounce/bounce_notify_util.c b/src/bounce/bounce_notify_util.c
-index 38112f8ad..1c7cb851a 100644
+index 38112f8..1c7cb85 100644
 --- a/src/bounce/bounce_notify_util.c
 +++ b/src/bounce/bounce_notify_util.c
 @@ -210,6 +210,8 @@
@@ -286,7 +286,7 @@ index 38112f8ad..1c7cb851a 100644
  
  int     bounce_header(VSTREAM *bounce, BOUNCE_INFO *bounce_info,
 diff --git a/src/bounce/bounce_notify_util_tester.c b/src/bounce/bounce_notify_util_tester.c
-index 3151ced48..a50918688 100644
+index 3151ced..a509186 100644
 --- a/src/bounce/bounce_notify_util_tester.c
 +++ b/src/bounce/bounce_notify_util_tester.c
 @@ -3,6 +3,7 @@
@@ -321,7 +321,7 @@ index 3151ced48..a50918688 100644
  		      NO_POSTMASTER_COPY) < 0)
  	msg_fatal("bounce_header: %m");
 diff --git a/src/bounce/bounce_notify_verp.c b/src/bounce/bounce_notify_verp.c
-index e0844599e..eec7f50d2 100644
+index e084459..eec7f50 100644
 --- a/src/bounce/bounce_notify_verp.c
 +++ b/src/bounce/bounce_notify_verp.c
 @@ -163,11 +163,10 @@ int     bounce_notify_verp(int flags, char *service, char *queue_name,
@@ -341,7 +341,7 @@ index e0844599e..eec7f50d2 100644
  		/*
  		 * Send the bounce message header, some boilerplate text that
 diff --git a/src/bounce/bounce_one_service.c b/src/bounce/bounce_one_service.c
-index 2524cbc75..3bd0d6f53 100644
+index 2524cbc..3bd0d6f 100644
 --- a/src/bounce/bounce_one_service.c
 +++ b/src/bounce/bounce_one_service.c
 @@ -186,11 +186,10 @@ int     bounce_one_service(int flags, char *queue_name, char *queue_id,
@@ -361,7 +361,7 @@ index 2524cbc75..3bd0d6f53 100644
  		/*
  		 * Send the bounce message header, some boilerplate text that
 diff --git a/src/bounce/bounce_service.h b/src/bounce/bounce_service.h
-index 21e323c69..6876ed650 100644
+index 21e323c..6876ed6 100644
 --- a/src/bounce/bounce_service.h
 +++ b/src/bounce/bounce_service.h
 @@ -81,6 +81,9 @@ typedef struct {
@@ -384,7 +384,7 @@ index 21e323c69..6876ed650 100644
  extern int bounce_boilerplate(VSTREAM *, BOUNCE_INFO *);
  extern int bounce_recipient_log(VSTREAM *, BOUNCE_INFO *);
 diff --git a/src/bounce/bounce_warn_service.c b/src/bounce/bounce_warn_service.c
-index 84ea22278..30a057a9b 100644
+index 84ea222..30a057a 100644
 --- a/src/bounce/bounce_warn_service.c
 +++ b/src/bounce/bounce_warn_service.c
 @@ -208,11 +208,10 @@ int     bounce_warn_service(int unused_flags, char *service, char *queue_name,
@@ -404,7 +404,7 @@ index 84ea22278..30a057a9b 100644
  	    /*
  	     * Send the bounce message header, some boilerplate text that
 diff --git a/src/cleanup/Makefile.in b/src/cleanup/Makefile.in
-index 5430e2f64..51da728b5 100644
+index 5430e2f..51da728 100644
 --- a/src/cleanup/Makefile.in
 +++ b/src/cleanup/Makefile.in
 @@ -982,6 +982,7 @@ cleanup_envelope_test.o: ../../include/header_opts.h
@@ -416,7 +416,7 @@ index 5430e2f64..51da728b5 100644
  cleanup_envelope_test.o: ../../include/maps.h
  cleanup_envelope_test.o: ../../include/match_list.h
 diff --git a/src/cleanup/cleanup.h b/src/cleanup/cleanup.h
-index 680d87daa..ee810f79e 100644
+index 680d87d..ee810f7 100644
 --- a/src/cleanup/cleanup.h
 +++ b/src/cleanup/cleanup.h
 @@ -102,6 +102,7 @@ typedef struct CLEANUP_STATE {
@@ -428,7 +428,7 @@ index 680d87daa..ee810f79e 100644
      int     defer_delay;		/* deferred delivery */
  #endif
 diff --git a/src/cleanup/cleanup_envelope.c b/src/cleanup/cleanup_envelope.c
-index 1091db028..ecbed87eb 100644
+index 1091db0..ecbed87 100644
 --- a/src/cleanup/cleanup_envelope.c
 +++ b/src/cleanup/cleanup_envelope.c
 @@ -87,6 +87,22 @@
@@ -489,7 +489,7 @@ index 1091db028..ecbed87eb 100644
  	if (state->flags & CLEANUP_FLAG_INRCPT) {
  	    if (state->milters || cleanup_milters) {
 diff --git a/src/cleanup/cleanup_envelope_test.c b/src/cleanup/cleanup_envelope_test.c
-index eda68e110..c4c54b695 100644
+index eda68e1..c4c54b6 100644
 --- a/src/cleanup/cleanup_envelope_test.c
 +++ b/src/cleanup/cleanup_envelope_test.c
 @@ -12,6 +12,7 @@
@@ -661,7 +661,7 @@ index eda68e110..c4c54b695 100644
  };
  
 diff --git a/src/cleanup/cleanup_state.c b/src/cleanup/cleanup_state.c
-index d6eca2f66..5074917cb 100644
+index d6eca2f..5074917 100644
 --- a/src/cleanup/cleanup_state.c
 +++ b/src/cleanup/cleanup_state.c
 @@ -127,6 +127,7 @@ CLEANUP_STATE *cleanup_state_alloc(VSTREAM *src)
@@ -682,7 +682,7 @@ index d6eca2f66..5074917cb 100644
  	milter_free(state->milters);
      if (state->milter_ext_from)
 diff --git a/src/global/cleanup_strflags.c b/src/global/cleanup_strflags.c
-index afcf47317..507f67e1d 100644
+index afcf473..507f67e 100644
 --- a/src/global/cleanup_strflags.c
 +++ b/src/global/cleanup_strflags.c
 @@ -56,6 +56,7 @@ static struct cleanup_flag_map cleanup_flag_map[] = {
@@ -694,7 +694,7 @@ index afcf47317..507f67e1d 100644
  
  /* cleanup_strflags - map flags code to printable string */
 diff --git a/src/global/cleanup_user.h b/src/global/cleanup_user.h
-index 6d7c03ada..b638a4d20 100644
+index 6d7c03a..b638a4d 100644
 --- a/src/global/cleanup_user.h
 +++ b/src/global/cleanup_user.h
 @@ -26,6 +26,7 @@
@@ -706,7 +706,7 @@ index 6d7c03ada..b638a4d20 100644
  #define CLEANUP_FLAG_FILTER_ALL	(CLEANUP_FLAG_FILTER | CLEANUP_FLAG_MILTER)
  
 diff --git a/src/global/mail_proto.h b/src/global/mail_proto.h
-index 4c3f33966..01cddcca7 100644
+index 4c3f339..01cddcc 100644
 --- a/src/global/mail_proto.h
 +++ b/src/global/mail_proto.h
 @@ -157,6 +157,7 @@ extern char *mail_pathname(const char *, const char *);
@@ -718,7 +718,7 @@ index 4c3f33966..01cddcca7 100644
  #define MAIL_ATTR_RCPT_COUNT	"recipient_count"
  #define MAIL_ATTR_ORCPT		"original_recipient"
 diff --git a/src/global/post_mail.c b/src/global/post_mail.c
-index f787acc8f..e65d8d471 100644
+index f787acc..e65d8d4 100644
 --- a/src/global/post_mail.c
 +++ b/src/global/post_mail.c
 @@ -15,6 +15,17 @@
@@ -830,7 +830,7 @@ index f787acc8f..e65d8d471 100644
  	myfree(state->recipient);
  	state->notify(state->stream, state->context);
 diff --git a/src/global/post_mail.h b/src/global/post_mail.h
-index 2e855c3d0..63807c053 100644
+index 2e855c3..63807c0 100644
 --- a/src/global/post_mail.h
 +++ b/src/global/post_mail.h
 @@ -30,6 +30,8 @@

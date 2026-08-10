@@ -2,7 +2,8 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-patch_file="$repo_dir/patches/postfix-3.11.5-sasl-external-client-cert.patch"
+postfix_version=$(sed -n 's/^ARG POSTFIX_VERSION=//p' "$repo_dir/Dockerfile")
+patch_file="$repo_dir/patches/postfix-${postfix_version}-sasl-external-client-cert.patch"
 expected_patch_sha=$(sed -n 's/^ARG POSTFIX_EXTERNAL_PATCH_SHA256=//p' "$repo_dir/Dockerfile")
 actual_patch_sha=$(sha256sum "$patch_file" | awk '{print $1}')
 
@@ -19,12 +20,12 @@ else
     cleanup=true
     trap 'if $cleanup; then rm -rf "$work_dir"; fi' EXIT HUP INT TERM
     source_url=$(sed -n 's/^ARG POSTFIX_SOURCE_URL=//p' "$repo_dir/Dockerfile")
-    source_url=$(printf '%s\n' "$source_url" | sed 's/${POSTFIX_VERSION}/3.11.5/g')
+    source_url=$(printf '%s\n' "$source_url" | sed "s/\${POSTFIX_VERSION}/${postfix_version}/g")
     expected_source_sha=$(sed -n 's/^ARG POSTFIX_SHA256=//p' "$repo_dir/Dockerfile")
     curl -fsSLo "$work_dir/postfix.tgz" "$source_url"
     printf '%s  %s\n' "$expected_source_sha" "$work_dir/postfix.tgz" | sha256sum -c -
     tar -xzf "$work_dir/postfix.tgz" -C "$work_dir"
-    source_dir="$work_dir/postfix-3.11.5"
+    source_dir="$work_dir/postfix-${postfix_version}"
 fi
 
 patch -d "$source_dir" -p1 --dry-run < "$patch_file"
