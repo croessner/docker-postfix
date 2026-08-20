@@ -23,6 +23,7 @@ The image uses a clean multi-stage build, pinned upstream sources, predictable r
 - [Custom Configuration and Maps](#custom-configuration-and-maps)
 - [SMTPUTF8 / EAI](#smtputf8--eai)
 - [TLS and TLSRPT](#tls-and-tlsrpt)
+- [Local DSN origin for Milters](#local-dsn-origin-for-milters)
 - [SASL EXTERNAL with client certificates](#sasl-external-with-client-certificates)
 - [Container Logging](#container-logging)
 - [Health Check](#health-check)
@@ -367,6 +368,28 @@ Typical integration pattern:
 2. Share the socket path with the Postfix container.
 3. Set `POSTFIX_smtp_tlsrpt_enable=yes`.
 4. If needed, override `POSTFIX_RUNTIME_TLSRPT_SOCKET_NAME`.
+
+## Local DSN origin for Milters
+
+The pinned Postfix 3.11.6 source is patched at build time with
+`patches/postfix-3.11.6-dsn-origin-0001.patch` and
+`patches/postfix-3.11.6-dsn-origin-0002.patch`. The build verifies both
+checksums and refuses to apply the version-specific series to another Postfix
+release.
+
+The patch series makes the normally negotiated Milter macro
+`{postfix_dsn_origin}` available with exactly two values:
+
+- `internal` for a null-sender delivery status notification posted by
+  Postfix bounce(8)
+- `external` for every other message, including externally submitted
+  null-sender messages and other internally generated mail
+
+The internal Postfix representation is one boolean cleanup flag asserted only
+through the bounce(8)-specific DSN posting path. No original envelope or
+recipient collection is included in the macro. A Milter using `internal` as
+origin evidence must still validate the null sender, DSN structure and
+content, and any embedded message.
 
 ## SASL EXTERNAL with client certificates
 

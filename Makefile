@@ -43,7 +43,7 @@ run:
 
 test-source:
 	./tests/check-postfix-external-patch.sh
-	./tests/check-postfix-dsn-evidence-patches.sh
+	./tests/check-postfix-dsn-origin-patches.sh
 
 test-smoke:
 	docker run --rm $(IMAGE_NAME):$(TAG) postfix check
