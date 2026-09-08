@@ -80,7 +80,7 @@ The image is built in two stages:
 
 Current pinned defaults in this repository:
 
-- Postfix `3.11.6`
+- Postfix `3.11.7`
 - `libtlsrpt` `0.5.0`
 - Alpine `3.24`
 
@@ -121,9 +121,9 @@ To pin an explicit upstream release:
 
 ```bash
 docker build \
-  --build-arg POSTFIX_VERSION=3.11.6 \
-  --build-arg POSTFIX_SHA256=b9a748705b1cab0a4afcbe42f934c82a33b342ba3229017fb508c71700078d07 \
-  -t postfix:3.11.6 .
+  --build-arg POSTFIX_VERSION=3.11.7 \
+  --build-arg POSTFIX_SHA256=a2f3242345753448072177fae83c322a403c9263696996406201145dab8e8625 \
+  -t postfix:3.11.7 .
 ```
 
 Multi-arch build with `buildx`:
@@ -131,9 +131,9 @@ Multi-arch build with `buildx`:
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg POSTFIX_VERSION=3.11.6 \
-  --build-arg POSTFIX_SHA256=b9a748705b1cab0a4afcbe42f934c82a33b342ba3229017fb508c71700078d07 \
-  -t postfix:3.11.6 \
+  --build-arg POSTFIX_VERSION=3.11.7 \
+  --build-arg POSTFIX_SHA256=a2f3242345753448072177fae83c322a403c9263696996406201145dab8e8625 \
+  -t postfix:3.11.7 \
   .
 ```
 
@@ -181,7 +181,7 @@ Recommended Docker Hub setup:
 - create a public repository in your own namespace, for example `<your-namespace>/postfix`
 - create a Docker Hub access token dedicated to CI
 - keep `latest` for the default branch
-- publish release tags in the form `v<postfix-version>-r<revision>`, for example `v3.11.6-r1`
+- publish release tags in the form `v<postfix-version>-r<revision>`, for example `v3.11.7-r1`
 
 ## License
 
@@ -371,9 +371,9 @@ Typical integration pattern:
 
 ## Local DSN origin for Milters
 
-The pinned Postfix 3.11.6 source is patched at build time with
-`patches/postfix-3.11.6-dsn-origin-0001.patch` and
-`patches/postfix-3.11.6-dsn-origin-0002.patch`. The build verifies both
+The pinned Postfix 3.11.7 source is patched at build time with
+`patches/postfix-3.11.7-dsn-origin-0001.patch` and
+`patches/postfix-3.11.7-dsn-origin-0002.patch`. The build verifies both
 checksums and refuses to apply the version-specific series to another Postfix
 release.
 
@@ -393,8 +393,8 @@ content, and any embedded message.
 
 ## SASL EXTERNAL with client certificates
 
-The pinned Postfix 3.11.6 source is patched at build time with
-`patches/postfix-3.11.6-sasl-external-client-cert.patch`. The build verifies
+The pinned Postfix 3.11.7 source is patched at build time with
+`patches/postfix-3.11.7-sasl-external-client-cert.patch`. The build verifies
 the patch checksum and refuses to apply this version-specific patch to another
 Postfix release.
 
