@@ -91,24 +91,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          old_version="${{ steps.upstream.outputs.current_version }}"
-          old_sha256="${{ steps.upstream.outputs.current_sha256 }}"
           new_version="${{ steps.upstream.outputs.latest_version }}"
           new_sha256="${{ steps.upstream.outputs.latest_sha256 }}"
 
+          # Update only the pins. Keep history, patch filenames and patch-version
+          # guards intact until a maintainer qualifies the downstream series.
           sed -i "s/^ARG POSTFIX_VERSION=.*/ARG POSTFIX_VERSION=${new_version}/" Dockerfile
           sed -i "s/^ARG POSTFIX_SHA256=.*/ARG POSTFIX_SHA256=${new_sha256}/" Dockerfile
-
-          OLD_VERSION="$old_version" \
-          NEW_VERSION="$new_version" \
-          OLD_SHA256="$old_sha256" \
-          NEW_SHA256="$new_sha256" \
-          ruby -e '
-            readme = File.read("README.md")
-            readme.gsub!(ENV.fetch("OLD_VERSION"), ENV.fetch("NEW_VERSION"))
-            readme.gsub!(ENV.fetch("OLD_SHA256"), ENV.fetch("NEW_SHA256"))
-            File.write("README.md", readme)
-          '
 
       - name: Create or update pull request
         if: steps.upstream.outputs.update_needed == 'true'
@@ -116,6 +105,7 @@ jobs:
         with:
           branch: automation/postfix-upstream
           delete-branch: true
+          draft: true
           commit-message: ${{ steps.upstream.outputs.pr_title }}
           title: ${{ steps.upstream.outputs.pr_title }}
           body: |
@@ -129,7 +119,16 @@ jobs:
 
             Updated files:
             - `Dockerfile`
-            - `README.md`
+
+            Maintainer qualification required before merge:
+            - Check which downstream patches remain necessary upstream.
+            - Update patch filenames, version guards and checksums consistently.
+            - Update the README current-version examples and patch table without rewriting history.
+            - Run source contracts, container regression tests and image smoke tests.
+            - Verify the embedded source archive and license notices.
+
+            This draft deliberately retains patch-version guards so an unqualified
+            version bump cannot publish an image.
 
             Sources:
             - https://www.postfix.org/

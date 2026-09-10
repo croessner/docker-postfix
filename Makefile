@@ -46,6 +46,7 @@ test-source:
 	./tests/check-postfix-dsn-origin-patches.sh
 
 test-smoke:
+	docker run --rm --entrypoint sh -v $$(pwd)/tests/check-source-distribution.sh:/tmp/check-source-distribution.sh:ro $(IMAGE_NAME):$(TAG) /tmp/check-source-distribution.sh
 	docker run --rm $(IMAGE_NAME):$(TAG) postfix check
 	docker run --rm $(IMAGE_NAME):$(TAG) sh -eu -c '\
 	  postconf -d smtpd_tls_crl_file | grep -q "smtpd_tls_crl_file ="; \

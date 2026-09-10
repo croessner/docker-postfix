@@ -1,0 +1,20 @@
+name: Validate patched image
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify patch source contracts
+        run: make test-source
+      - name: Build image and run compiled regression tests
+        run: docker build -t postfix:review .
+      - name: Verify runtime and bundled sources
+        run: make test-smoke IMAGE_NAME=postfix TAG=review

@@ -3,12 +3,12 @@ ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
 
 ARG ALPINE_VERSION=3.24
-ARG POSTFIX_VERSION=3.11.6
-ARG POSTFIX_SHA256=b9a748705b1cab0a4afcbe42f934c82a33b342ba3229017fb508c71700078d07
+ARG POSTFIX_VERSION=3.11.7
+ARG POSTFIX_SHA256=a2f3242345753448072177fae83c322a403c9263696996406201145dab8e8625
 ARG POSTFIX_SOURCE_URL=http://ftp.porcupine.org/mirrors/postfix-release/official/postfix-${POSTFIX_VERSION}.tar.gz
-ARG POSTFIX_EXTERNAL_PATCH_VERSION=3.11.6
+ARG POSTFIX_EXTERNAL_PATCH_VERSION=3.11.7
 ARG POSTFIX_EXTERNAL_PATCH_SHA256=f6a27933d7b9c99d7debd3c2f779eb65864bbd72cbd01d63a08fff3a5a9a0929
-ARG POSTFIX_DSN_ORIGIN_PATCH_VERSION=3.11.6
+ARG POSTFIX_DSN_ORIGIN_PATCH_VERSION=3.11.7
 ARG POSTFIX_DSN_ORIGIN_PATCH_0001_SHA256=61446967b41fafa1c824d57c31206afbd245d72b31c23400176c75558ae0b52b
 ARG POSTFIX_DSN_ORIGIN_PATCH_0002_SHA256=580da3629b82fa0924021fa071b9f491b14701be6582662d133799ac82040bd9
 ARG TLSRPT_VERSION=0.5.0
@@ -36,6 +36,7 @@ ARG POSTFIX_DSN_ORIGIN_PATCH_VERSION
 ARG POSTFIX_DSN_ORIGIN_PATCH_0001_SHA256
 ARG POSTFIX_DSN_ORIGIN_PATCH_0002_SHA256
 ARG TLSRPT_GIT_TAG
+ARG OCI_REVISION
 ARG TINYCDB_SHA256
 ARG TINYCDB_SOURCE_URL
 
@@ -75,9 +76,9 @@ RUN apk upgrade --no-cache \
 
 WORKDIR /tmp/build
 
-COPY patches/postfix-3.11.6-sasl-external-client-cert.patch postfix-sasl-external.patch
-COPY patches/postfix-3.11.6-dsn-origin-0001.patch postfix-dsn-origin-0001.patch
-COPY patches/postfix-3.11.6-dsn-origin-0002.patch postfix-dsn-origin-0002.patch
+COPY patches/postfix-3.11.7-sasl-external-client-cert.patch postfix-sasl-external.patch
+COPY patches/postfix-3.11.7-dsn-origin-0001.patch postfix-dsn-origin-0001.patch
+COPY patches/postfix-3.11.7-dsn-origin-0002.patch postfix-dsn-origin-0002.patch
 
 RUN curl -fsSLo postfix.tgz "${POSTFIX_SOURCE_URL}" \
     && test "${POSTFIX_VERSION}" = "${POSTFIX_EXTERNAL_PATCH_VERSION}" \
@@ -101,6 +102,21 @@ RUN git clone --depth 1 --branch "${TLSRPT_GIT_TAG}" https://github.com/sys4/lib
        fi \
     && tar -xzf tinycdb.tgz \
     && mv "tinycdb-"* tinycdb
+
+# Preserve the exact modified sources before configure/make changes them.
+# This archive travels with each image, including locally built images.
+COPY Dockerfile LICENSE NOTICE.md /tmp/build/source-recipe/
+COPY licenses/ /tmp/build/source-recipe/licenses/
+COPY patches/ /tmp/build/source-recipe/patches/
+RUN mkdir -p /tmp/source-distribution \
+    && printf 'Postfix=%s\nPostfix-SHA256=%s\nlibtlsrpt-commit=%s\nOCI-revision=%s\n' \
+         "${POSTFIX_VERSION}" "${POSTFIX_SHA256}" \
+         "$(git -C libtlsrpt rev-parse HEAD)" "${OCI_REVISION}" \
+         > source-recipe/BUILD-SOURCES.txt \
+    && tar --exclude=.git -czf /tmp/source-distribution/build-sources.tar.gz \
+         postfix libtlsrpt tinycdb source-recipe \
+    && cd /tmp/source-distribution \
+    && sha256sum build-sources.tar.gz > SHA256SUMS
 
 WORKDIR /tmp/build/libtlsrpt
 
@@ -252,6 +268,9 @@ RUN apk upgrade --no-cache \
         /var/lib/postfix \
         /var/spool/postfix
 
+COPY --from=builder /tmp/source-distribution/ /usr/share/doc/postfix-custom/sources/
+COPY NOTICE.md LICENSE /usr/share/doc/postfix-custom/
+COPY licenses/ /usr/share/doc/postfix-custom/licenses/
 COPY --from=builder /tmp/out/ /
 COPY --from=builder /usr/local/lib/libtlsrpt.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libcdb.so* /usr/local/lib/
@@ -268,6 +287,9 @@ RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-healthc
     && chown -R postfix:postfix /var/lib/postfix \
     && postconf -d smtputf8_enable | grep -q 'yes' \
     && (postfix set-permissions || true)
+
+RUN --mount=type=bind,source=tests/check-source-distribution.sh,target=/tmp/check-source-distribution.sh \
+    sh /tmp/check-source-distribution.sh
 
 EXPOSE 25 465 587
 
