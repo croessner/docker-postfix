@@ -80,7 +80,7 @@ The image is built in two stages:
 
 Current pinned defaults in this repository:
 
-- Postfix `3.11.6`
+- Postfix `3.11.7`
 - `libtlsrpt` `0.5.0`
 - Alpine `3.24`
 
@@ -121,9 +121,9 @@ To pin an explicit upstream release:
 
 ```bash
 docker build \
-  --build-arg POSTFIX_VERSION=3.11.6 \
-  --build-arg POSTFIX_SHA256=b9a748705b1cab0a4afcbe42f934c82a33b342ba3229017fb508c71700078d07 \
-  -t postfix:3.11.6 .
+  --build-arg POSTFIX_VERSION=3.11.7 \
+  --build-arg POSTFIX_SHA256=a2f3242345753448072177fae83c322a403c9263696996406201145dab8e8625 \
+  -t postfix:3.11.7 .
 ```
 
 Multi-arch build with `buildx`:
@@ -131,9 +131,9 @@ Multi-arch build with `buildx`:
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg POSTFIX_VERSION=3.11.6 \
-  --build-arg POSTFIX_SHA256=b9a748705b1cab0a4afcbe42f934c82a33b342ba3229017fb508c71700078d07 \
-  -t postfix:3.11.6 \
+  --build-arg POSTFIX_VERSION=3.11.7 \
+  --build-arg POSTFIX_SHA256=a2f3242345753448072177fae83c322a403c9263696996406201145dab8e8625 \
+  -t postfix:3.11.7 \
   .
 ```
 
@@ -181,11 +181,51 @@ Recommended Docker Hub setup:
 - create a public repository in your own namespace, for example `<your-namespace>/postfix`
 - create a Docker Hub access token dedicated to CI
 - keep `latest` for the default branch
-- publish release tags in the form `v<postfix-version>-r<revision>`, for example `v3.11.6-r1`
+- publish release tags in the form `v<postfix-version>-r<revision>`, for example `v3.11.7-r1`
 
 ## License
 
-The repository content is licensed under the MIT License. See [LICENSE](./LICENSE).
+The original container scripts and build tooling are licensed under the MIT
+License. See [LICENSE](./LICENSE). Postfix source and the Postfix patch series
+are distributed under IPL-1.0, with existing per-file notices preserved; they
+are not covered by the repository's blanket MIT license. See
+[NOTICE.md](./NOTICE.md) and [Postfix license](./licenses/POSTFIX-LICENSE).
+
+This is an RNS-maintained customized Postfix image, not an official upstream
+Postfix image. Upstream submission or acceptance is not required to distribute
+our modifications and must not be inferred from their inclusion here.
+
+Every image contains the exact patched Postfix sources, libtlsrpt and tinycdb
+sources, their original license files, the Dockerfile, patches and source
+metadata in `/usr/share/doc/postfix-custom/sources/build-sources.tar.gz`.
+Extract them without starting a mail server:
+
+```sh
+docker run --rm --entrypoint cat chrroessner/postfix:3.11.7 \
+  /usr/share/doc/postfix-custom/sources/build-sources.tar.gz > build-sources.tar.gz
+```
+
+Use an image digest instead of a mutable tag when retrieving sources for a
+specific deployment. `SHA256SUMS` is stored beside the archive. Sources remain
+available with that image even if upstream download locations change. Alpine
+packages remain under their individual licenses; the archive covers the three
+components compiled by this Dockerfile, not all Alpine package sources.
+
+### Included Postfix patches
+
+The table describes the current build. Patch filenames identify the qualified
+upstream version; image revisions distinguish our releases from upstream.
+
+| Patch | Included in current Postfix build | First included | Purpose |
+| --- | --- | --- | --- |
+| [SASL EXTERNAL / client certificates](patches/postfix-3.11.7-sasl-external-client-cert.patch) | 3.11.7 | 3.11.5 | Pass verified certificate SAN identity and fingerprint to Dovecot SASL/PfxHTTP; filter EXTERNAL per session; optional full-chain CRLs and disabled resumption with CRLs. |
+| [DSN origin 1/2](patches/postfix-3.11.7-dsn-origin-0001.patch) | 3.11.7 | 3.11.6 (origin enum series) | Mark locally generated null-sender delivery notifications internally. |
+| [DSN origin 2/2](patches/postfix-3.11.7-dsn-origin-0002.patch) | 3.11.7 | 3.11.6 (origin enum series) | Expose `{postfix_dsn_origin}` as `internal` or `external` to Milters; add documentation and regression fixtures. |
+
+All three remain downstream patches in upstream Postfix 3.11.7. Their contents
+are unchanged from our qualified 3.11.6 patch set. Earlier 3.11.5/3.11.6 image
+revisions used an older DSN evidence design before the origin enum series;
+consult the exact Git revision for historical images.
 
 The published container image additionally includes Postfix, which is distributed under `IPL-1.0`, plus bundled runtime dependencies such as `libtlsrpt` and `tinycdb`. Because of that, the OCI image metadata declares a combined license expression.
 
@@ -371,9 +411,9 @@ Typical integration pattern:
 
 ## Local DSN origin for Milters
 
-The pinned Postfix 3.11.6 source is patched at build time with
-`patches/postfix-3.11.6-dsn-origin-0001.patch` and
-`patches/postfix-3.11.6-dsn-origin-0002.patch`. The build verifies both
+The pinned Postfix 3.11.7 source is patched at build time with
+`patches/postfix-3.11.7-dsn-origin-0001.patch` and
+`patches/postfix-3.11.7-dsn-origin-0002.patch`. The build verifies both
 checksums and refuses to apply the version-specific series to another Postfix
 release.
 
@@ -393,8 +433,8 @@ content, and any embedded message.
 
 ## SASL EXTERNAL with client certificates
 
-The pinned Postfix 3.11.6 source is patched at build time with
-`patches/postfix-3.11.6-sasl-external-client-cert.patch`. The build verifies
+The pinned Postfix 3.11.7 source is patched at build time with
+`patches/postfix-3.11.7-sasl-external-client-cert.patch`. The build verifies
 the patch checksum and refuses to apply this version-specific patch to another
 Postfix release.
 
