@@ -14,7 +14,9 @@ and others. All Rights Reserved.
 
 Downstream contributions: Christian Roessner / Rößner-Network-Solutions,
 2026: verified client-certificate SASL EXTERNAL bridge, CRL enforcement,
-and local DSN origin flag / Milter macro. See the README patch table and
+and mechanical backport of Wietse Venema's upstream internal-origin feature
+from postfix-3.12-20260915. The original downstream DSN-origin implementation
+has been removed. Upstream credits and semantics are preserved. See the README patch table and
 the patch files for the changes. The MIT license for our independent
 container tooling does not replace the Postfix license for these patches.
 

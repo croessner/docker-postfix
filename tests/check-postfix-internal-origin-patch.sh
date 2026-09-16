@@ -4,8 +4,7 @@ set -eu
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 postfix_version=$(sed -n 's/^ARG POSTFIX_VERSION=//p' "$repo_dir/Dockerfile")
 external_patch="$repo_dir/patches/postfix-${postfix_version}-sasl-external-client-cert.patch"
-patch_0001="$repo_dir/patches/postfix-${postfix_version}-dsn-origin-0001.patch"
-patch_0002="$repo_dir/patches/postfix-${postfix_version}-dsn-origin-0002.patch"
+origin_patch="$repo_dir/patches/postfix-${postfix_version}-internal-origin-upstream.patch"
 
 check_sha()
 {
@@ -19,8 +18,7 @@ check_sha()
     fi
 }
 
-check_sha POSTFIX_DSN_ORIGIN_PATCH_0001_SHA256 "$patch_0001"
-check_sha POSTFIX_DSN_ORIGIN_PATCH_0002_SHA256 "$patch_0002"
+check_sha POSTFIX_INTERNAL_ORIGIN_PATCH_SHA256 "$origin_patch"
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/postfix-dsn-origin-source.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
@@ -39,37 +37,27 @@ else
 fi
 
 patch -d "$source_dir" -p1 < "$external_patch"
-patch -d "$source_dir" -p1 < "$patch_0001"
-patch -d "$source_dir" -p1 < "$patch_0002"
+patch -d "$source_dir" -p1 < "$origin_patch"
 
 test ! -e "$source_dir/conf/master.cf.rej"
 if grep -Fq 'dsn_cleanup' "$source_dir/conf/master.cf"; then
     echo "unexpected separate dsn_cleanup service" >&2
     exit 1
 fi
-grep -Fq 'CLEANUP_FLAG_DSN_ORIGIN' "$source_dir/src/global/cleanup_user.h"
-grep -Fq '{postfix_dsn_origin}' "$source_dir/src/cleanup/cleanup_milter.c"
-grep -Fq 'CLEANUP_DSN_ORIGIN_INTERNAL' "$source_dir/src/cleanup/cleanup_milter.c"
-grep -Fq 'CLEANUP_DSN_ORIGIN_EXTERNAL' "$source_dir/src/cleanup/cleanup_milter.c"
-grep -Fq 'post_mail_fopen_dsn_nowait' "$source_dir/src/global/post_mail.c"
-for bounce_source in \
-    bounce_notify_service.c \
-    bounce_notify_verp.c \
-    bounce_one_service.c \
-    bounce_trace_service.c \
-    bounce_warn_service.c
-do
-    grep -Fq 'post_mail_fopen_dsn_nowait' \
-        "$source_dir/src/bounce/$bounce_source"
+for origin in BOUNCE NOTIFY VERIFY; do
+    grep -Fq "CLEANUP_FLAG_ORG_$origin" "$source_dir/src/global/cleanup_user.h"
 done
-grep -Fq 'Delivery status notification origin' \
-    "$source_dir/proto/MILTER_README.html"
-grep -Fq 'cleanup_milter_dsn_origin_test' "$source_dir/src/cleanup/Makefile.in"
+grep -Fq '{postfix_internal_origin}' "$source_dir/src/cleanup/cleanup_milter.c"
+grep -Fq '{postfix_internal_origin}' "$source_dir/src/global/mail_params.h"
+grep -Fq 'cleanup_org_flag_from_source_flag(source_class)' "$source_dir/src/global/post_mail.c"
+grep -Fq 'cleanup_org_flag_to_name(state->flags)' "$source_dir/src/cleanup/cleanup_milter.c"
+grep -Fq 'cleanup_milter_origin_test' "$source_dir/src/cleanup/Makefile.in"
+grep -Fq 'postfix-macros' "$source_dir/proto/MILTER_README.html"
 if grep -R -E -q \
-    'postfix_dsn_evidence|postfix_dsn_original_envelope|postfix_dsn_original_queue_id|MAIL_ATTR_DSN_ORIG_ENVELOPE' \
+    'postfix_dsn_origin|CLEANUP_FLAG_DSN_ORIGIN|post_mail_fopen_dsn_nowait|postfix_dsn_evidence' \
     "$source_dir/src" "$source_dir/proto"; then
-    echo "unexpected superseded DSN evidence interface" >&2
+    echo "unexpected superseded downstream DSN interface" >&2
     exit 1
 fi
 
-echo "postfix dsn origin patch series source contract: PASS"
+echo "postfix upstream internal origin source contract: PASS"

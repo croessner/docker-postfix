@@ -43,7 +43,7 @@ run:
 
 test-source:
 	./tests/check-postfix-external-patch.sh
-	./tests/check-postfix-dsn-origin-patches.sh
+	./tests/check-postfix-internal-origin-patch.sh
 
 test-smoke:
 	docker run --rm --entrypoint sh -v $$(pwd)/tests/check-source-distribution.sh:/tmp/check-source-distribution.sh:ro $(IMAGE_NAME):$(TAG) /tmp/check-source-distribution.sh
@@ -51,6 +51,7 @@ test-smoke:
 	docker run --rm $(IMAGE_NAME):$(TAG) sh -eu -c '\
 	  postconf -d smtpd_tls_crl_file | grep -q "smtpd_tls_crl_file ="; \
 	  postconf -d smtputf8_enable | grep -q "yes"; \
+	  postconf -d milter_connect_macros | grep -Fq "{postfix_internal_origin}"; \
 	  postconf -m > /tmp/postfix-maps; \
 	  for map in cdb ldap lmdb memcache mongodb mysql nis pcre pgsql sqlite; do \
 	    grep -qx "$$map" /tmp/postfix-maps; \

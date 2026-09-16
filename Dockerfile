@@ -8,9 +8,8 @@ ARG POSTFIX_SHA256=a2f3242345753448072177fae83c322a403c9263696996406201145dab8e8
 ARG POSTFIX_SOURCE_URL=http://ftp.porcupine.org/mirrors/postfix-release/official/postfix-${POSTFIX_VERSION}.tar.gz
 ARG POSTFIX_EXTERNAL_PATCH_VERSION=3.11.7
 ARG POSTFIX_EXTERNAL_PATCH_SHA256=f6a27933d7b9c99d7debd3c2f779eb65864bbd72cbd01d63a08fff3a5a9a0929
-ARG POSTFIX_DSN_ORIGIN_PATCH_VERSION=3.11.7
-ARG POSTFIX_DSN_ORIGIN_PATCH_0001_SHA256=61446967b41fafa1c824d57c31206afbd245d72b31c23400176c75558ae0b52b
-ARG POSTFIX_DSN_ORIGIN_PATCH_0002_SHA256=580da3629b82fa0924021fa071b9f491b14701be6582662d133799ac82040bd9
+ARG POSTFIX_INTERNAL_ORIGIN_PATCH_VERSION=3.11.7
+ARG POSTFIX_INTERNAL_ORIGIN_PATCH_SHA256=677cfeee497042f5e6b5c68dc0275bc332d12fde436b10c5913732e9f87a3583
 ARG TLSRPT_VERSION=0.5.0
 ARG TLSRPT_GIT_TAG=v${TLSRPT_VERSION}
 ARG TINYCDB_VERSION=0.81
@@ -32,9 +31,8 @@ ARG POSTFIX_SHA256
 ARG POSTFIX_SOURCE_URL
 ARG POSTFIX_EXTERNAL_PATCH_VERSION
 ARG POSTFIX_EXTERNAL_PATCH_SHA256
-ARG POSTFIX_DSN_ORIGIN_PATCH_VERSION
-ARG POSTFIX_DSN_ORIGIN_PATCH_0001_SHA256
-ARG POSTFIX_DSN_ORIGIN_PATCH_0002_SHA256
+ARG POSTFIX_INTERNAL_ORIGIN_PATCH_VERSION
+ARG POSTFIX_INTERNAL_ORIGIN_PATCH_SHA256
 ARG TLSRPT_GIT_TAG
 ARG OCI_REVISION
 ARG TINYCDB_SHA256
@@ -77,8 +75,7 @@ RUN apk upgrade --no-cache \
 WORKDIR /tmp/build
 
 COPY patches/postfix-3.11.7-sasl-external-client-cert.patch postfix-sasl-external.patch
-COPY patches/postfix-3.11.7-dsn-origin-0001.patch postfix-dsn-origin-0001.patch
-COPY patches/postfix-3.11.7-dsn-origin-0002.patch postfix-dsn-origin-0002.patch
+COPY patches/postfix-3.11.7-internal-origin-upstream.patch postfix-internal-origin.patch
 
 RUN curl -fsSLo postfix.tgz "${POSTFIX_SOURCE_URL}" \
     && test "${POSTFIX_VERSION}" = "${POSTFIX_EXTERNAL_PATCH_VERSION}" \
@@ -89,11 +86,9 @@ RUN curl -fsSLo postfix.tgz "${POSTFIX_SOURCE_URL}" \
     && mv "postfix-${POSTFIX_VERSION}" postfix \
     && echo "${POSTFIX_EXTERNAL_PATCH_SHA256}  postfix-sasl-external.patch" | sha256sum -c - \
     && patch -d postfix -p1 < postfix-sasl-external.patch \
-    && test "${POSTFIX_VERSION}" = "${POSTFIX_DSN_ORIGIN_PATCH_VERSION}" \
-    && echo "${POSTFIX_DSN_ORIGIN_PATCH_0001_SHA256}  postfix-dsn-origin-0001.patch" | sha256sum -c - \
-    && echo "${POSTFIX_DSN_ORIGIN_PATCH_0002_SHA256}  postfix-dsn-origin-0002.patch" | sha256sum -c - \
-    && patch -d postfix -p1 < postfix-dsn-origin-0001.patch \
-    && patch -d postfix -p1 < postfix-dsn-origin-0002.patch
+    && test "${POSTFIX_VERSION}" = "${POSTFIX_INTERNAL_ORIGIN_PATCH_VERSION}" \
+    && echo "${POSTFIX_INTERNAL_ORIGIN_PATCH_SHA256}  postfix-internal-origin.patch" | sha256sum -c - \
+    && patch -d postfix -p1 < postfix-internal-origin.patch
 
 RUN git clone --depth 1 --branch "${TLSRPT_GIT_TAG}" https://github.com/sys4/libtlsrpt.git libtlsrpt \
     && curl -fsSLo tinycdb.tgz "${TINYCDB_SOURCE_URL}" \
@@ -107,6 +102,7 @@ RUN git clone --depth 1 --branch "${TLSRPT_GIT_TAG}" https://github.com/sys4/lib
 # This archive travels with each image, including locally built images.
 COPY Dockerfile LICENSE NOTICE.md /tmp/build/source-recipe/
 COPY licenses/ /tmp/build/source-recipe/licenses/
+COPY docs/upstream-internal-origin.md /tmp/build/source-recipe/
 COPY patches/ /tmp/build/source-recipe/patches/
 RUN mkdir -p /tmp/source-distribution \
     && printf 'Postfix=%s\nPostfix-SHA256=%s\nlibtlsrpt-commit=%s\nOCI-revision=%s\n' \
@@ -201,7 +197,9 @@ RUN apk add --no-cache tzdata \
     && addgroup -S postfix \
     && adduser -S -D -H -G postfix postfix
 
-RUN make -C src/cleanup cleanup_milter_dsn_origin_test \
+# postcat in the upstream fixtures reads main.cf and formats local timestamps.
+# The build is staged under /tmp/out; use its installed configuration explicitly.
+RUN MAIL_CONFIG=/tmp/out/etc/postfix TZ=America/New_York make -C src/cleanup tests \
     && TZ=America/New_York make -C src/bounce \
         with-message-id_test no-message-id_test
 

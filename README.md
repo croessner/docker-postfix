@@ -201,7 +201,7 @@ metadata in `/usr/share/doc/postfix-custom/sources/build-sources.tar.gz`.
 Extract them without starting a mail server:
 
 ```sh
-docker run --rm --entrypoint cat chrroessner/postfix:3.11.7 \
+docker run --rm --entrypoint cat chrroessner/postfix:3.11.7-r1 \
   /usr/share/doc/postfix-custom/sources/build-sources.tar.gz > build-sources.tar.gz
 ```
 
@@ -216,16 +216,23 @@ components compiled by this Dockerfile, not all Alpine package sources.
 The table describes the current build. Patch filenames identify the qualified
 upstream version; image revisions distinguish our releases from upstream.
 
-| Patch | Included in current Postfix build | First included | Purpose |
+| Patch | Current image | Upstream status | Purpose |
 | --- | --- | --- | --- |
-| [SASL EXTERNAL / client certificates](patches/postfix-3.11.7-sasl-external-client-cert.patch) | 3.11.7 | 3.11.5 | Pass verified certificate SAN identity and fingerprint to Dovecot SASL/PfxHTTP; filter EXTERNAL per session; optional full-chain CRLs and disabled resumption with CRLs. |
-| [DSN origin 1/2](patches/postfix-3.11.7-dsn-origin-0001.patch) | 3.11.7 | 3.11.6 (origin enum series) | Mark locally generated null-sender delivery notifications internally. |
-| [DSN origin 2/2](patches/postfix-3.11.7-dsn-origin-0002.patch) | 3.11.7 | 3.11.6 (origin enum series) | Expose `{postfix_dsn_origin}` as `internal` or `external` to Milters; add documentation and regression fixtures. |
+| [SASL EXTERNAL / client certificates](patches/postfix-3.11.7-sasl-external-client-cert.patch) | 3.11.7-r1 | Downstream; unchanged from previous 3.11.7 build | Pass verified certificate SAN identity and fingerprint to Dovecot SASL/PfxHTTP; optional full-chain CRLs with TLS resumption disabled. |
+| [Internal origin](patches/postfix-3.11.7-internal-origin-upstream.patch) | 3.11.7-r1 | Backport of Wietse Venema's final implementation in postfix-3.12-20260915 | Expose `{postfix_internal_origin}` as `bounce`, `notify`, `verify`, or absent/empty, using upstream provenance semantics. |
 
-All three remain downstream patches in upstream Postfix 3.11.7. Their contents
-are unchanged from our qualified 3.11.6 patch set. Earlier 3.11.5/3.11.6 image
-revisions used an older DSN evidence design before the origin enum series;
-consult the exact Git revision for historical images.
+The original two downstream DSN-origin patches have been removed. Older
+3.11.7 images (before revision r1) exported `{postfix_dsn_origin}` with
+`internal`/`external`. That interface is no longer provided or aliased.
+Consumers must migrate together with this image. Pin the revision and digest;
+the floating `3.11.7` tag alone does not identify the macro contract.
+
+Upstream Postfix 3.11.7 itself does **not** include this feature. The final
+implementation was published in the official 3.12 development snapshot on
+2026-09-15. This image keeps the stable 3.11.7 base and backports only that
+feature, preserving its values, behavior and author attribution. See
+[backport provenance](docs/upstream-internal-origin.md) for source identity,
+mechanical adaptations and migration checks.
 
 The published container image additionally includes Postfix, which is distributed under `IPL-1.0`, plus bundled runtime dependencies such as `libtlsrpt` and `tinycdb`. Because of that, the OCI image metadata declares a combined license expression.
 
@@ -411,25 +418,31 @@ Typical integration pattern:
 
 ## Local DSN origin for Milters
 
-The pinned Postfix 3.11.7 source is patched at build time with
-`patches/postfix-3.11.7-dsn-origin-0001.patch` and
-`patches/postfix-3.11.7-dsn-origin-0002.patch`. The build verifies both
-checksums and refuses to apply the version-specific series to another Postfix
-release.
+Since image revision **3.11.7-r1**, the build applies Wietse Venema's final
+upstream internal-origin implementation from `postfix-3.12-20260915`, backported
+to the pinned stable source with a version guard and SHA-256 verification.
+There is no old-macro fallback.
 
-The patch series makes the normally negotiated Milter macro
-`{postfix_dsn_origin}` available with exactly two values:
+| `{postfix_internal_origin}` | Upstream meaning |
+| --- | --- |
+| `bounce` | Locally generated delivery notification, including double bounces and postmaster copies. |
+| `notify` | Locally generated SMTP session transcript. |
+| `verify` | Address-verification probe; Milters must leave it unchanged. |
+| absent or empty | Other messages, including SMTP/QMQP/sendmail submissions and internal alias/forward processing. |
 
-- `internal` for a null-sender delivery status notification posted by
-  Postfix bounce(8)
-- `external` for every other message, including externally submitted
-  null-sender messages and other internally generated mail
+The macro is included in the default `milter_connect_macros`. Explicit operator
+macro lists must include it if CONNECT delivery is needed. A Milter can also
+request it through normal macro negotiation, including at end of headers.
 
-The internal Postfix representation is one boolean cleanup flag asserted only
-through the bounce(8)-specific DSN posting path. No original envelope or
-recipient collection is included in the macro. A Milter using `internal` as
-origin evidence must still validate the null sender, DSN structure and
-content, and any embedded message.
+This macro proves provenance, not permission to sign any message. A DKIM2 DSN
+adapter must retain its null-envelope-sender, recipient, report-structure and
+embedded-message validation. `notify`, `verify`, and non-null-sender
+postmaster/double-bounce messages must not be mistaken for normal DSNs.
+
+Deploy the matching adapter and image in a coordinated change. The old adapter
+will not recognize the new macro and may pass bounces without signing them;
+the new adapter cannot use the removed downstream macro. Rollback must restore
+the old Postfix image, adapter and configuration together.
 
 ## SASL EXTERNAL with client certificates
 
